@@ -368,8 +368,7 @@ def make_3_song_collage(image_urls, titles, artists, variants, output_path="coll
         draw.text((title_x, img_height + 5 * SCALE), title_text, font=font_title, fill="#eeeeee")
         draw.text((artist_x, img_height + 30 * SCALE), artist_text, font=font_artist, fill="#cccccc")
 
-    final_image = canvas.resize((canvas.width, canvas.height), Image.Resampling.LANCZOS)
-    final_image.save(output_path)
+    canvas.save(output_path)
     
     # print(f"✅ Saved collage to {output_path}")
 
