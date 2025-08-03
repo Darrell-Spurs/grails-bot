@@ -13,20 +13,17 @@ import numpy as np
 import colorsys
 
 # Add the project root to the Python path for db import
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.insert(0,
+                os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from db import *
+
 
 async def get_filtered_albums(included, artist_name, ctx, token):
     headers = {"Authorization": f"Bearer {token}"}
 
     # Step 1: Search artist ID
     search_url = "https://api.spotify.com/v1/search"
-    params = {
-        "q": artist_name,
-        "type": "artist",
-        "limit": 1,
-        "market": "US"
-    }
+    params = {"q": artist_name, "type": "artist", "limit": 1, "market": "US"}
     res = requests.get(search_url, headers=headers, params=params).json()
     items = res.get("artists", {}).get("items", [])
 
@@ -74,10 +71,12 @@ async def get_filtered_albums(included, artist_name, ctx, token):
 
     return filtered_albums, artist_name_corrected, artist_id
 
+
 async def get_songs_from_album(album_type, artist_name, ctx, token):
     headers = {"Authorization": f"Bearer {token}"}
 
-    filtered_albums, artist_name_corrected, _ = await get_filtered_albums(album_type, artist_name, ctx, token)
+    filtered_albums, artist_name_corrected, _ = await get_filtered_albums(
+        album_type, artist_name, ctx, token)
     songs = dict()
 
     for album in filtered_albums:
@@ -91,11 +90,9 @@ async def get_songs_from_album(album_type, artist_name, ctx, token):
         all_tracks = []
         offset = 0
         while True:
-            params = {
-                "limit": 50,
-                "offset": offset
-            }
-            res = requests.get(tracks_url, headers=headers, params=params).json()
+            params = {"limit": 50, "offset": offset}
+            res = requests.get(tracks_url, headers=headers,
+                               params=params).json()
             items = res.get("items", [])
             all_tracks.extend(items)
 
@@ -106,12 +103,14 @@ async def get_songs_from_album(album_type, artist_name, ctx, token):
         # Format: song name - album name
         filtered_tracks = [
             track for track in all_tracks
-            if any(artist["name"] == artist_name_corrected for artist in track["artists"])
+            if any(artist["name"] == artist_name_corrected
+                   for artist in track["artists"])
         ]
 
         formatted_tracks = [track for track in filtered_tracks]
         songs[album_id] = formatted_tracks
     return songs, artist_name_corrected
+
 
 async def save_albums_to_db(album_type, artist_name, ctx=None, token=None):
     """
@@ -129,7 +128,8 @@ async def save_albums_to_db(album_type, artist_name, ctx=None, token=None):
         token = get_access_token()
 
     # Get all albums for the artist
-    filtered_albums, artist_name_corrected, artist_id = await get_filtered_albums(album_type, artist_name, ctx, token)
+    filtered_albums, artist_name_corrected, artist_id = await get_filtered_albums(
+        album_type, artist_name, ctx, token)
 
     if not filtered_albums:
         if ctx:
@@ -143,10 +143,11 @@ async def save_albums_to_db(album_type, artist_name, ctx=None, token=None):
         try:
             album_id = album["id"]
             album_name = album["name"]
-            album_image = album.get("images", [{}])[0].get("url", None) 
+            album_image = album.get("images", [{}])[0].get("url", None)
 
             # Save album to database
-            add_album(album_id, album_name, artist_name_corrected, artist_id, album_image)
+            add_album(album_id, album_name, artist_name_corrected, artist_id,
+                      album_image)
             albums_saved += 1
 
         except Exception as e:
@@ -154,9 +155,12 @@ async def save_albums_to_db(album_type, artist_name, ctx=None, token=None):
             continue
 
     if ctx:
-        await ctx.send(f"✅ Saved **{albums_saved}** albums by **{artist_name_corrected}** to database.")
+        await ctx.send(
+            f"✅ Saved **{albums_saved}** albums by **{artist_name_corrected}** to database."
+        )
 
     return albums_saved, artist_name_corrected
+
 
 async def add_songs_to_db(album_type, artist_name, ctx=None, token=None):
     """
@@ -174,7 +178,8 @@ async def add_songs_to_db(album_type, artist_name, ctx=None, token=None):
         token = get_access_token()
 
     # Use the existing get_songs_from_album function to get all songs
-    songs_by_album_id, artist_name_corrected = await get_songs_from_album(album_type, artist_name, ctx, token)
+    songs_by_album_id, artist_name_corrected = await get_songs_from_album(
+        album_type, artist_name, ctx, token)
 
     if not songs_by_album_id:
         if ctx:
@@ -182,14 +187,17 @@ async def add_songs_to_db(album_type, artist_name, ctx=None, token=None):
         return 0, artist_name
 
     # Get album information for database operations
-    filtered_albums, _, _ = await get_filtered_albums(album_type, artist_name, ctx, token)
+    filtered_albums, _, _ = await get_filtered_albums(album_type, artist_name,
+                                                      ctx, token)
 
     songs_saved = 0
 
     # Process each album and its songs
     for album_id, tracks in songs_by_album_id.items():
         # Find the album info from filtered_albums
-        album_info = next((album for album in filtered_albums if album["id"] == album_id), None)
+        album_info = next(
+            (album for album in filtered_albums if album["id"] == album_id),
+            None)
 
         if not album_info:
             print(f"Warning: Could not find album info for ID '{album_id}'")
@@ -212,7 +220,8 @@ async def add_songs_to_db(album_type, artist_name, ctx=None, token=None):
                 song_name = track["name"]
 
                 # Add song to songs table (with default rarity "common")
-                existing_song_id = add_song(song_id, song_name, artist_name_corrected, "common")
+                existing_song_id = add_song(song_id, song_name,
+                                            artist_name_corrected, "common")
 
                 if existing_song_id is not None:
                     song_id = existing_song_id
@@ -227,9 +236,12 @@ async def add_songs_to_db(album_type, artist_name, ctx=None, token=None):
                 continue
 
     if ctx:
-        await ctx.send(f"✅ Saved **{songs_saved}** songs by **{artist_name_corrected}** to database.")
+        await ctx.send(
+            f"✅ Saved **{songs_saved}** songs by **{artist_name_corrected}** to database."
+        )
 
     return songs_saved, artist_name_corrected
+
 
 def get_random_song():
     artists = get_all_artists()
@@ -239,10 +251,12 @@ def get_random_song():
     print(f"{random_song}, {random_artist}")
     return random_song[0], random_song[1], random_artist
 
+
 def get_random_album(song_id):
     albums = get_album_details_by_song(song_id)
     album = random.choice(albums)
     return album
+
 
 def draw_variant():
     variants = ["default", "glitched", "sketch", "mythic", "diamond"]
@@ -259,15 +273,18 @@ def draw_variant():
         return "glitched"
     return "default"
 
+
 def create_glitch_effect_old(image):
     r, g, b = image.split()
 
     # Slightly shift each color channel
     r_np = np.array(r)
-    g_np = np.roll(np.array(g), 5, axis=0)   # vertical shift
+    g_np = np.roll(np.array(g), 5, axis=0)  # vertical shift
     b_np = np.roll(np.array(b), -5, axis=1)  # horizontal shift
 
-    glitched = Image.merge("RGB", (Image.fromarray(r_np), Image.fromarray(g_np), Image.fromarray(b_np)))
+    glitched = Image.merge(
+        "RGB",
+        (Image.fromarray(r_np), Image.fromarray(g_np), Image.fromarray(b_np)))
 
     # Add horizontal slice glitching
     for i in range(0, glitched.height, 20):
@@ -277,6 +294,7 @@ def create_glitch_effect_old(image):
         glitched.paste(region, (shift, i))
 
     return glitched
+
 
 def create_glitched_effect(image):
     shift = -0.1
@@ -295,6 +313,7 @@ def create_glitched_effect(image):
     shifted_arr = np.stack([r, g, b], axis=-1) * 255
     return Image.fromarray(shifted_arr.astype("uint8"))
 
+
 def create_sketch_effect(img_input):
     img = cv2.cvtColor(np.array(img_input), cv2.COLOR_RGB2BGR)
     gray_image = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -309,25 +328,32 @@ def create_sketch_effect(img_input):
 
     # Enhance contrast and sharpness using PIL
     pil_img = Image.fromarray(sketch)
-    pil_img = ImageEnhance.Contrast(pil_img).enhance(3)   # More fill and pop
+    pil_img = ImageEnhance.Contrast(pil_img).enhance(3)  # More fill and pop
     pil_img = ImageEnhance.Sharpness(pil_img).enhance(3)  # Clearer edges
     # fixed_size = (300, 300)
     # pil_img = pil_img.resize(fixed_size, Image.ANTIALIAS)
 
     return pil_img
 
+
 def create_mystic_effect(url):
     mystic_img = main(url)
     return mystic_img
 
-def make_3_song_collage(image_urls, titles, artists, variants, output_path="collage.jpg"):
+
+def make_3_song_collage(image_urls,
+                        titles,
+                        artists,
+                        variants,
+                        output_path="collage.jpg"):
     SCALE = 2
 
     images = []
     for i in range(len(image_urls)):
         url = image_urls[i]
         response = requests.get(url)
-        img = Image.open(BytesIO(response.content)).convert("RGB").resize((300 * SCALE, 300 * SCALE))
+        img = Image.open(BytesIO(response.content)).convert("RGB").resize(
+            (300 * SCALE, 300 * SCALE))
         if variants[i] == "glitched":
             img = create_glitched_effect(img)
         elif variants[i] == "sketch":
@@ -335,8 +361,8 @@ def make_3_song_collage(image_urls, titles, artists, variants, output_path="coll
         images.append(img)
 
     try:
-        font_title = ImageFont.truetype("calibrib.ttf", 22 * SCALE)
-        font_artist = ImageFont.truetype("calibri.ttf", 18 * SCALE)
+        font_title = ImageFont.truetype("fonts/calibrib.ttf", 22 * SCALE)
+        font_artist = ImageFont.truetype("fonts/calibri.ttf", 18 * SCALE)
     except:
         font_title = ImageFont.load_default()
         font_artist = ImageFont.load_default()
@@ -365,10 +391,17 @@ def make_3_song_collage(image_urls, titles, artists, variants, output_path="coll
         artist_w = draw.textlength(artist_text, font=font_artist)
         title_x = x + (img_width - title_w) // 2
         artist_x = x + (img_width - artist_w) // 2
-        draw.text((title_x, img_height + 5 * SCALE), title_text, font=font_title, fill="#eeeeee")
-        draw.text((artist_x, img_height + 30 * SCALE), artist_text, font=font_artist, fill="#cccccc")
+        draw.text((title_x, img_height + 5 * SCALE),
+                  title_text,
+                  font=font_title,
+                  fill="#eeeeee")
+        draw.text((artist_x, img_height + 30 * SCALE),
+                  artist_text,
+                  font=font_artist,
+                  fill="#cccccc")
 
-    final_image = canvas.resize((canvas.width, canvas.height), Image.Resampling.LANCZOS)
+    final_image = canvas.resize((canvas.width, canvas.height),
+                                Image.Resampling.LANCZOS)
     final_image.save(output_path)
 
     # print(f"✅ Saved collage to {output_path}")
@@ -386,7 +419,8 @@ ARTISTS_TO_ADD = [
     # "Conan Gray",
     # "ROSÉ",
     "Nancy Ajram"
-]    
+]
+
 
 async def main():
     for artist_name in ARTISTS_TO_ADD:
@@ -395,14 +429,19 @@ async def main():
 
         album_type = "album"  # or "single" based on your needs
         # Save albums to database
-        albums_saved, corrected_name = await save_albums_to_db(album_type, artist_name, token=token)
+        albums_saved, corrected_name = await save_albums_to_db(album_type,
+                                                               artist_name,
+                                                               token=token)
         print(f"Albums saved: {albums_saved}")
 
         # Save songs to database
-        songs_saved, corrected_name = await add_songs_to_db(album_type, artist_name, token=token)
+        songs_saved, corrected_name = await add_songs_to_db(album_type,
+                                                            artist_name,
+                                                            token=token)
         print(f"Songs saved: {songs_saved}")
 
         print(f"Finished processing {corrected_name}\n")
+
 
 if __name__ == "__main__":
     # Example usage
