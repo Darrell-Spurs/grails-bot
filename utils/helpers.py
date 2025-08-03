@@ -361,8 +361,8 @@ def make_3_song_collage(image_urls,
         images.append(img)
 
     try:
-        font_title = ImageFont.truetype("fonts/calibrib.ttf", 22 * SCALE)
-        font_artist = ImageFont.truetype("fonts/calibri.ttf", 18 * SCALE)
+        font_title = ImageFont.truetype("utils/fonts/calibrib.ttf", 22 * SCALE)
+        font_artist = ImageFont.truetype("utils/fonts/calibri.ttf", 18 * SCALE)
     except:
         font_title = ImageFont.load_default()
         font_artist = ImageFont.load_default()
