@@ -67,7 +67,7 @@ async def get_filtered_albums(included, artist_name, ctx, token):
         album for album in all_albums
         if not any(word in album["name"].lower() for word in filtered_words)
     ]
-    
+
     filtered_albums.sort(key=lambda album: -len(album["artists"]))
     filtered_albums.reverse()
     print(len(filtered_albums), "albums after filtering")
@@ -116,18 +116,18 @@ async def get_songs_from_album(album_type, artist_name, ctx, token):
 async def save_albums_to_db(album_type, artist_name, ctx=None, token=None):
     """
     Save all albums from an artist to the database
-    
+
     Args:
         artist_name (str): Name of the artist
         ctx: Discord context (optional, for sending messages)
         token (str): Spotify access token (optional, will get new one if not provided)
-    
+
     Returns:
         tuple: (number_of_albums_saved, artist_name_corrected)
     """
     if not token:
         token = get_access_token()
-    
+
     # Get all albums for the artist
     filtered_albums, artist_name_corrected, artist_id = await get_filtered_albums(album_type, artist_name, ctx, token)
 
@@ -135,44 +135,44 @@ async def save_albums_to_db(album_type, artist_name, ctx=None, token=None):
         if ctx:
             await ctx.send(f"❌ No albums found for **{artist_name}**.")
         return 0, artist_name
-    
+
     albums_saved = 0
-    
+
     # Save each album to database
     for album in filtered_albums:
         try:
             album_id = album["id"]
             album_name = album["name"]
             album_image = album.get("images", [{}])[0].get("url", None) 
-            
+
             # Save album to database
             add_album(album_id, album_name, artist_name_corrected, artist_id, album_image)
             albums_saved += 1
-            
+
         except Exception as e:
             print(f"Error saving album {album.get('name', 'Unknown')}: {e}")
             continue
-    
+
     if ctx:
         await ctx.send(f"✅ Saved **{albums_saved}** albums by **{artist_name_corrected}** to database.")
-    
+
     return albums_saved, artist_name_corrected
 
 async def add_songs_to_db(album_type, artist_name, ctx=None, token=None):
     """
     Save all songs from an artist's albums to the database
-    
+
     Args:
         artist_name (str): Name of the artist
         ctx: Discord context (optional, for sending messages)
         token (str): Spotify access token (optional, will get new one if not provided)
-    
+
     Returns:
         tuple: (number_of_songs_saved, artist_name_corrected)
     """
     if not token:
         token = get_access_token()
-    
+
     # Use the existing get_songs_from_album function to get all songs
     songs_by_album_id, artist_name_corrected = await get_songs_from_album(album_type, artist_name, ctx, token)
 
@@ -180,37 +180,37 @@ async def add_songs_to_db(album_type, artist_name, ctx=None, token=None):
         if ctx:
             await ctx.send(f"❌ No songs found for **{artist_name}**.")
         return 0, artist_name
-    
+
     # Get album information for database operations
     filtered_albums, _, _ = await get_filtered_albums(album_type, artist_name, ctx, token)
-    
+
     songs_saved = 0
-    
+
     # Process each album and its songs
     for album_id, tracks in songs_by_album_id.items():
         # Find the album info from filtered_albums
         album_info = next((album for album in filtered_albums if album["id"] == album_id), None)
-        
+
         if not album_info:
             print(f"Warning: Could not find album info for ID '{album_id}'")
             continue
-            
+
         album_name = album_info["name"]
-        
+
         # Ensure the album exists in the database
         # try:
         #     add_album(album_id, album_name, artist_name_corrected)
         # except Exception as e:
         #     print(f"Error saving album {album_name}: {e}")
         #     continue
-        
+
         # Save each song and link it to the album (tracks already contain full track objects)
         for track in tracks:
             try:
                 song_id = uuid.uuid4().hex[:8]
                 spotify_song_id = track["id"]
                 song_name = track["name"]
-                
+
                 # Add song to songs table (with default rarity "common")
                 existing_song_id = add_song(song_id, song_name, artist_name_corrected, "common")
 
@@ -219,16 +219,16 @@ async def add_songs_to_db(album_type, artist_name, ctx=None, token=None):
 
                 # Link song to album in song_album table
                 link_song_album(song_id, spotify_song_id, album_id, album_name)
-                
+
                 songs_saved += 1
-                
+
             except Exception as e:
                 print(f"Error saving song {track.get('name', 'Unknown')}: {e}")
                 continue
-    
+
     if ctx:
         await ctx.send(f"✅ Saved **{songs_saved}** songs by **{artist_name_corrected}** to database.")
-    
+
     return songs_saved, artist_name_corrected
 
 def get_random_song():
@@ -368,8 +368,9 @@ def make_3_song_collage(image_urls, titles, artists, variants, output_path="coll
         draw.text((title_x, img_height + 5 * SCALE), title_text, font=font_title, fill="#eeeeee")
         draw.text((artist_x, img_height + 30 * SCALE), artist_text, font=font_artist, fill="#cccccc")
 
-    canvas.save(output_path)
-    
+    final_image = canvas.resize((canvas.width, canvas.height), Image.Resampling.LANCZOS)
+    final_image.save(output_path)
+
     # print(f"✅ Saved collage to {output_path}")
 
 
@@ -391,16 +392,16 @@ async def main():
     for artist_name in ARTISTS_TO_ADD:
         token = get_access_token()
         print(f"\n--- Processing {artist_name} ---")
-        
+
         album_type = "album"  # or "single" based on your needs
         # Save albums to database
         albums_saved, corrected_name = await save_albums_to_db(album_type, artist_name, token=token)
         print(f"Albums saved: {albums_saved}")
-        
+
         # Save songs to database
         songs_saved, corrected_name = await add_songs_to_db(album_type, artist_name, token=token)
         print(f"Songs saved: {songs_saved}")
-        
+
         print(f"Finished processing {corrected_name}\n")
 
 if __name__ == "__main__":
