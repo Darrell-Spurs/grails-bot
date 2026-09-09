@@ -158,3 +158,38 @@ cython_debug/
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+# ---- Grails-Bot: data & generated artifacts (should never be in git) ----
+# Live database + WAL sidecar files
+music.db
+music.db-wal
+music.db-shm
+*.sqlite
+*.sqlite3
+# Per-pull generated images/GIFs (written at runtime, change constantly)
+choices.jpg
+mythic_animated.gif
+spinning_vinyl.gif
+spinning_vinyl_sig.gif
+glitched_image.jpg
+pencil_sketch_output.png
+vinyl_test.png
+battle.png
+collage.jpg
+
+# ---- Editor / IDE local settings ----
+.vscode/
+.idea/
+
+# ---- OS cruft ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- Replit leftovers (empty//unused locally) ----
+.local/
+
+# ---- Local scratch / experiments ----
+scratch/
+scratchpad/
+*.local.py

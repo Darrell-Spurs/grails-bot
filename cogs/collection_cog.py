@@ -1,15 +1,32 @@
 import os, sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import logging
+from typing import Optional
+
 import discord
-from discord.ext import commands
-from utils.helpers import get_collection_by_artist, get_collection_by_rarity, get_collection_by_rarity_and_artist, get_collection_by_user
-import discord
+from discord import app_commands
 from discord.ext import commands
 from discord.ext import menus
+from utils.helpers import get_collection_by_artist, get_collection_by_rarity, get_collection_by_rarity_and_artist, get_collection_by_user
+from db import (get_user_mythic_copy_number, get_collection_with_copy_numbers,
+                get_collection_by_rarity_with_copy_numbers, get_collection_by_artist_with_copy_numbers,
+                get_collection_by_rarity_and_artist_with_copy_numbers, get_all_artists)
+
+log = logging.getLogger("grails.collection")
+
+RARITIES = ["mythic", "sig_vinyl", "vinyl", "sketch", "glitched", "default"]
 
 
-RARITIES = ["mythic", "vinyl", "sketch", "glitched", "default"]
+async def _rarity_autocomplete(interaction: discord.Interaction, current: str):
+    cur = current.lower()
+    return [app_commands.Choice(name=r.title(), value=r) for r in RARITIES if cur in r][:25]
+
+
+async def _artist_autocomplete(interaction: discord.Interaction, current: str):
+    cur = current.lower()
+    artists = [a for a in get_all_artists() if cur in a.lower()]
+    return [app_commands.Choice(name=a, value=a) for a in artists[:25]]
 
 class CollectionPageSource(menus.ListPageSource):
     def __init__(self, data, title):
@@ -20,14 +37,28 @@ class CollectionPageSource(menus.ListPageSource):
         embed = discord.Embed(title=self.title, color=discord.Color.teal())
         rarity_emojis = {
             "mythic": "💎",
-            "vinyl": "💿",
+            "sig_vinyl": "🖋️",
+            "vinyl": "📀",
             "sketch": "✏️",
             "glitched": "🧩",
             "default": "⚪️"
         }
-        for name, artist, variant, album, image in entries:
+        for entry in entries:
+            # Handle both old format (5 elements) and new format (6 elements with copy_number)
+            if len(entry) == 6:
+                name, artist, variant, album, image, copy_number = entry
+            else:
+                name, artist, variant, album, image = entry
+                copy_number = 1  # Default for non-mythic or when copy number isn't available
+
+            # Format the name with copy number for mythics
+            if variant == "mythic":
+                display_name = f"{rarity_emojis[variant]} #{copy_number} {name} - {artist}"
+            else:
+                display_name = f"{rarity_emojis[variant]} {name} - {artist}"
+
             embed.add_field(
-                name=f"{rarity_emojis[variant]} {name} - {artist}",
+                name=display_name,
                 value=f"\n *{album or 'Unknown'}*",
                 inline=False
             )
@@ -42,42 +73,34 @@ class CollectionCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @commands.command(name="collection")
-    async def collection(self, ctx, *args):
+    @commands.hybrid_command(name="collection", aliases=["col"], description="View your song collection")
+    @app_commands.describe(rarity="Filter by rarity", artist="Filter by artist")
+    @app_commands.autocomplete(rarity=_rarity_autocomplete, artist=_artist_autocomplete)
+    async def collection(self, ctx, rarity: Optional[str] = None, *, artist: Optional[str] = None):
         user_id = str(ctx.author.id)
-        rarity = None
-        artist = None
-        print(f"User {ctx.author.display_name} requested their collection with args: {args}")
-
-        for arg in args:
-            if arg.lower() in RARITIES:
-                print(f"Found rarity filter: {arg.lower()}")
-                rarity = arg.lower()
-            else:
-                artist = " ".join([a for a in args if a.lower() not in RARITIES])
-                break
+        # Prefix convenience: if the first token isn't a real rarity, treat it as artist text
+        # (so `.collection Taylor Swift` still works without naming a rarity).
+        if rarity and rarity.lower() not in RARITIES:
+            artist = f"{rarity} {artist}".strip() if artist else rarity
+            rarity = None
+        rarity = rarity.lower() if rarity else None
+        log.info("%s requested collection (rarity=%s artist=%s)", ctx.author.display_name, rarity, artist)
 
         if rarity and artist:
-            print("rarity and artist filters found")
-            results = get_collection_by_rarity_and_artist(user_id, rarity, artist)
+            results = get_collection_by_rarity_and_artist_with_copy_numbers(user_id, rarity, artist)
             title = f"📖 {ctx.author.display_name}'s {artist.title()} {rarity.title()} Collection"
-            print(f"Filtered collection by rarity '{rarity}' and artist '{artist}' for user {user_id}")
-        
+
         elif rarity:
-            results = get_collection_by_rarity(user_id, rarity)
+            results = get_collection_by_rarity_with_copy_numbers(user_id, rarity)
             title = f"📖 {ctx.author.display_name}'s {rarity.title()} Collection"
-            print(f"Filtered collection by rarity '{rarity}' for user {user_id}")
-        
+
         elif artist:
-            print(f"Filtering collection by artist: {artist}")
-            results = get_collection_by_artist(user_id, artist)
+            results = get_collection_by_artist_with_copy_numbers(user_id, artist)
             title = f"📖 {ctx.author.display_name}'s {artist.title()} Collection"
-            print(f"Filtered collection by artist '{artist.title()}' for user {user_id}")
-        
+
         else:
-            results = get_collection_by_user(user_id)
+            results = get_collection_with_copy_numbers(user_id)
             title = f"📖 {ctx.author.display_name}'s Collection"
-            print(f"Retrieved full collection for user {user_id}")
 
         if not results:
             await ctx.send("📭 No cards found in your collection with those filters.")

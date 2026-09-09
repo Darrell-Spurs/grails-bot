@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Catalog – Grails-Bot Admin{% endblock %}
+{% block content %}
+<h1>Catalog</h1>
+
+<form method="get" class="inline-form">
+  <input type="text" name="q" placeholder="Search artists..." value="{{ q }}">
+  <button type="submit">Search</button>
+</form>
+
+<h2>Import Artist from Spotify</h2>
+<form method="post" action="{{ url_for('catalog.add_artist') }}" class="inline-form">
+  <input type="text" name="artist_name" placeholder="Artist name" required>
+  <button type="submit">Import</button>
+</form>
+<p class="muted">This fetches all albums and singles from Spotify and can take a moment.</p>
+
+<h2>Artists ({{ artists|length }})</h2>
+<ul class="artist-list">
+  {% for artist in artists %}
+  <li><a href="{{ url_for('catalog.artist_detail', artist=artist) }}">{{ artist }}</a></li>
+  {% else %}
+  <li class="muted">No artists found.</li>
+  {% endfor %}
+</ul>
+{% endblock %}

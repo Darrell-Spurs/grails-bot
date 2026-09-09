@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Grails-Bot Admin{% endblock %}</title>
+  <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  {% if session.get('authed') %}
+  <nav class="nav">
+    <div class="nav-brand">🎵 Grails-Bot Admin</div>
+    <a href="{{ url_for('dashboard.index') }}">Dashboard</a>
+    <a href="{{ url_for('catalog.artists') }}">Catalog</a>
+    <a href="{{ url_for('users.index') }}">Users</a>
+    <a href="{{ url_for('users.latest') }}">Latest Pulls</a>
+    <a href="{{ url_for('mythic.index') }}">Mythic Hunt</a>
+    <form method="post" action="{{ url_for('auth.logout') }}" class="nav-logout">
+      <button type="submit">Log out</button>
+    </form>
+  </nav>
+  {% endif %}
+
+  <main class="container">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <ul class="flashes">
+        {% for category, message in messages %}
+          <li class="flash flash-{{ category }}">{{ message }}</li>
+        {% endfor %}
+        </ul>
+      {% endif %}
+    {% endwith %}
+
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

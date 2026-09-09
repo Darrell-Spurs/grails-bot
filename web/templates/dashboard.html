@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Dashboard – Grails-Bot Admin{% endblock %}
+{% block content %}
+<h1>Dashboard</h1>
+
+<div class="stat-row">
+  <div class="stat-card"><div class="stat-value">{{ song_count }}</div><div class="stat-label">Songs</div></div>
+  <div class="stat-card"><div class="stat-value">{{ album_count }}</div><div class="stat-label">Albums</div></div>
+  <div class="stat-card"><div class="stat-value">{{ user_count }}</div><div class="stat-label">Users</div></div>
+</div>
+
+<h2>Current Mythic Hunt</h2>
+{% if hunt %}
+  <p><strong>{{ hunt.song_name }}</strong> by <strong>{{ hunt.artist }}</strong> from <em>{{ hunt.album_name }}</em></p>
+{% else %}
+  <p class="muted">No hunt set. <a href="{{ url_for('mythic.index') }}">Set one</a>.</p>
+{% endif %}
+
+<h2>Latest Pulls</h2>
+<table class="table">
+  <thead><tr><th>Song</th><th>Artist</th><th>Variant</th><th>Album</th><th>Collected At</th></tr></thead>
+  <tbody>
+    {% for id, song_name, artist, variant, album_name, collected_at in latest %}
+    <tr>
+      <td>{{ song_name }}</td>
+      <td>{{ artist }}</td>
+      <td>{{ variant }}</td>
+      <td>{{ album_name }}</td>
+      <td>{{ collected_at }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5" class="muted">No pulls yet.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

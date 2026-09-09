@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Mythic Hunt – Grails-Bot Admin{% endblock %}
+{% block content %}
+<h1>Mythic Hunt</h1>
+
+<h2>Current Target</h2>
+{% if hunt %}
+<p><strong>{{ hunt.song_name }}</strong> by <strong>{{ hunt.artist }}</strong> from <em>{{ hunt.album_name }}</em></p>
+<p><a href="{{ url_for('mythic.status', song_id=hunt.song_id) }}">View copy status</a></p>
+<form method="post" action="{{ url_for('mythic.clear_hunt') }}">
+  <button type="submit" class="btn-danger">Clear hunt</button>
+</form>
+{% else %}
+<p class="muted">No hunt currently set. The next mythic pull will be random.</p>
+{% endif %}
+
+<h2>Set a New Target</h2>
+<form method="get" class="inline-form">
+  <input type="text" name="q" placeholder="Search song or artist..." value="{{ q }}">
+  <button type="submit">Search</button>
+</form>
+
+{% if q %}
+<table class="table">
+  <thead><tr><th>Song</th><th>Artist</th><th>Album</th><th>Rarity</th><th></th></tr></thead>
+  <tbody>
+    {% for song_id, song_name, artist, rarity, album_id, album_name, album_url in results %}
+    <tr>
+      <td>{{ song_name }}</td>
+      <td>{{ artist }}</td>
+      <td>{{ album_name or '—' }}</td>
+      <td>{{ rarity }}</td>
+      <td>
+        {% if album_id %}
+        <form method="post" action="{{ url_for('mythic.set_hunt') }}">
+          <input type="hidden" name="song_id" value="{{ song_id }}">
+          <input type="hidden" name="song_name" value="{{ song_name }}">
+          <input type="hidden" name="artist" value="{{ artist }}">
+          <input type="hidden" name="album_id" value="{{ album_id }}">
+          <input type="hidden" name="album_name" value="{{ album_name }}">
+          <input type="hidden" name="album_url" value="{{ album_url }}">
+          <button type="submit">Set as hunt</button>
+        </form>
+        {% else %}
+        <span class="muted">No album linked</span>
+        {% endif %}
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5" class="muted">No matches.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

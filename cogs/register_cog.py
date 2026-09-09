@@ -1,23 +1,35 @@
 import discord
 from discord.ext import commands
+from db import register_user, user_exists, unregister_user
 
 class RegisterCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @commands.command()
+    @commands.hybrid_command(description="Register with the bot to start collecting")
     async def register(self, ctx):
-        await ctx.send("What's your username?")
+        # Check if user is already registered
+        if user_exists(ctx.author.id):
+            await ctx.send(f"❌ **{ctx.author.display_name}**, you are already registered! You can start collecting XPs right away.")
+            return
 
-        def check(message):
-            return message.author == ctx.author and message.channel == ctx.channel
+        register_user(ctx.author.id, xp=0, username=ctx.author.name)  # Register user in the database
+        await ctx.send(f"✅ Successfully Registered as **{ctx.author.display_name}**, you can now start to collect **XP**s from playing the game!")
+        return
 
-        try:
-            msg = await self.bot.wait_for('message', check=check, timeout=30.0)
-            username = msg.content
-            await ctx.send(f"✅ Registered as **{username}**!")
-        except discord.TimeoutError:
-            await ctx.send("⏰ You took too long to respond!")
+    @commands.command(alias=['ur'])
+    @commands.has_role("bot_admin")
+    async def unregister(self, ctx, user: discord.User):
+        """Unregister a user from the bot"""
+        if not user_exists(user.id):
+            await ctx.send(f"❌ **{user.name}** is not registered.")
+            return
+
+        unregister_user(user.id)
+        await ctx.send(f"✅ Successfully Unregistered **{user.name}**!")
+        return
+
+
 
 # ✅ Async setup function required in discord.py v2.x
 async def setup(bot):

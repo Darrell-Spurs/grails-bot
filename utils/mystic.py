@@ -177,56 +177,140 @@ def make_color_glowy(color, lightness_factor=2.4, glow_intensity=0.8):
     
     return (r_final, g_final, b_final)
 
-def create_mythic_album_gif(url, output_path="mythic_animated.gif", frames=60, duration=100, size=(300, 300)):
+def _compose_static_glow(base_img, glowy_color, intensity=0.8):
+    """Album cover + a *static* radial glow. Computed once and reused for every frame
+    (the expensive part: 25 ellipses + GaussianBlur(15) that used to run per frame)."""
+    glow_layer = Image.new("RGBA", base_img.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(glow_layer)
+    center = (base_img.width // 2, base_img.height // 2)
+    max_radius = 250
+    for r in range(250, 0, -10):
+        alpha = int(255 * (r / max_radius) * 0.15 * intensity)
+        draw.ellipse(
+            [center[0] - r, center[1] - r, center[0] + r, center[1] + r],
+            fill=glowy_color + (alpha,),
+        )
+    glow_layer = glow_layer.filter(ImageFilter.GaussianBlur(15))
+    return Image.alpha_composite(glow_layer, base_img)
+
+
+def _draw_wave_border(mythic_img, glowy_color, progress):
+    """Draw the animated counter-clockwise wave border onto `mythic_img` in place.
+    This is the only part that changes between frames."""
+    frame_draw = ImageDraw.Draw(mythic_img)
+    width, height = mythic_img.size
+    border_thickness = 12
+
+    perimeter = 2 * (width + height - 4)
+    wave_length = perimeter / 1.5
+    wave_position = (progress * perimeter) % perimeter
+
+    def calculate_wave_intensity(pos):
+        dist1 = abs(pos - wave_position)
+        dist2 = perimeter - dist1
+        distance = min(dist1, dist2)
+        if distance <= wave_length / 2:
+            wave_factor = math.cos(math.pi * distance / (wave_length / 2))
+            if wave_factor >= 0:
+                smooth_factor = wave_factor ** 0.7
+                return 0.6 + (1.0 - 0.6) * smooth_factor
+            else:
+                smooth_factor = (abs(wave_factor)) ** 1.2
+                return 0.6 - (0.6 - 0.3) * smooth_factor
+        return 0.4
+
+    for border_layer in range(border_thickness):
+        layer_offset = border_layer * 0.1
+        for side in ['top', 'right', 'bottom', 'left']:
+            if side == 'top':
+                start_pos, end_pos, y_coord = 0, width - 1, border_layer
+            elif side == 'right':
+                start_pos, end_pos, x_coord = width - 1, width + height - 2, width - 1 - border_layer
+            elif side == 'bottom':
+                start_pos, end_pos, y_coord = width + height - 2, 2 * width + height - 3, height - 1 - border_layer
+            else:
+                start_pos, end_pos, x_coord = 2 * width + height - 3, perimeter, border_layer
+
+            side_length = end_pos - start_pos
+            for i in range(max(1, side_length // 4)):
+                sample_pos = start_pos + (i * 4) % side_length
+                intensity = calculate_wave_intensity(sample_pos + layer_offset)
+
+                if intensity < 0.6:
+                    transition_factor = intensity / 0.6
+                    enhanced_factor = 0.7 + transition_factor * 0.5
+                    enhanced_glow = 0.3 + transition_factor * 0.3
+                    saturation_boost = 1.8 + transition_factor * 0.4
+                else:
+                    transition_factor = (intensity - 0.6) / 0.4
+                    enhanced_factor = 1.2 + transition_factor * 2.8
+                    enhanced_glow = 0.6 + transition_factor * 0.2
+                    saturation_boost = 1.2 + transition_factor * 0.3
+
+                vibrant_color = make_color_vibrant(glowy_color, saturation_boost, enhanced_factor)
+                border_color = make_color_glowy(vibrant_color, enhanced_factor, enhanced_glow)
+                alpha = int(255 * (0.8 + intensity * 0.2))
+                color = border_color + (alpha,)
+                line_w = 2 if border_layer < 8 else 1
+
+                if side == 'top':
+                    px = start_pos + i * 4
+                    frame_draw.line([(px, y_coord), (min(px + 3, width - 1), y_coord)], fill=color, width=line_w)
+                elif side == 'right':
+                    py = start_pos - width + 1 + i * 4
+                    frame_draw.line([(x_coord, py), (x_coord, min(py + 3, height - 1))], fill=color, width=line_w)
+                elif side == 'bottom':
+                    px = width - 1 - (i * 4)
+                    frame_draw.line([(max(px - 3, 0), y_coord), (px, y_coord)], fill=color, width=line_w)
+                else:
+                    py = height - 1 - (i * 4)
+                    frame_draw.line([(x_coord, max(py - 3, 0)), (x_coord, py)], fill=color, width=line_w)
+    return mythic_img
+
+
+def create_mythic_album_gif(url, output_path=None, frames=30, duration=100, size=(300, 300), return_bytes=False):
     """
-    Create an animated mythic GIF from an album image URL
-    
+    Create an animated mythic GIF: a *static* album cover + glow with only the border animating.
+
     Args:
         url: URL of the album image
-        output_path: Path to save the GIF (optional)
-        frames: Number of frames in the animation (default: 60)
-        duration: Duration per frame in milliseconds (default: 100)
-        size: Size to resize the image to (default: (300, 300))
-    
+        output_path: Path to save the GIF, or None to skip writing to disk
+        frames: Number of animation frames (default 30; was 60)
+        duration: ms per frame
+        size: image size
+        return_bytes: if True, also return an in-memory BytesIO (GIF) for direct discord.File use
+
     Returns:
-        PIL.Image: The first frame of the animated GIF (can be saved or further processed)
+        BytesIO (GIF) if return_bytes else the first PIL frame.
     """
-    # Download and process the image
     response = requests.get(url)
     base_img = Image.open(BytesIO(response.content)).convert("RGBA").resize(size)
-    
-    # Get the base dominant color
+
     dominant_color = get_dominant_color(base_img)
-    
+    glowy_color = make_color_glowy(dominant_color, 2.2, 0.6)
+
+    # Static cover + glow, built ONCE (used to be rebuilt every frame).
+    static_bg = _compose_static_glow(base_img, glowy_color, intensity=0.8)
+
     animation_frames = []
-    
     for i in range(frames):
-        # Calculate animation progress (0 to 1)
         progress = i / frames
-        
-        # Create smooth pulsing effect - one complete breathing cycle
-        # Using cosine for smoother start and end
-        pulse_main = 0.3 + 0.7 * (0.5 + 0.5 * math.cos(2 * math.pi * progress))  # Range: 0.3 to 1.0
-        
-        # Create the glowy color (keep it consistent, animate only intensity)
-        glowy_color = make_color_glowy(dominant_color, 2.2, 0.6)
-        
-        # Create the frame with gradient border
-        frame = create_mythic_frame_gradient(base_img, glowy_color, pulse_main, progress)
+        frame = static_bg.copy()
+        _draw_wave_border(frame, glowy_color, progress)
         animation_frames.append(frame)
-    
-    # Save as animated GIF
-    animation_frames[0].save(
-        output_path,
-        save_all=True,
-        append_images=animation_frames[1:],
-        duration=duration,
-        loop=0,  # Infinite loop
-        optimize=True
-    )
-    
-    # Return the first frame (or could return the saved path)
-    return animation_frames[0]
+
+    save_kwargs = dict(save_all=True, append_images=animation_frames[1:],
+                       duration=duration, loop=0, optimize=True, format="GIF")
+
+    buffer = None
+    if return_bytes:
+        buffer = BytesIO()
+        animation_frames[0].save(buffer, **save_kwargs)
+        buffer.seek(0)
+    if output_path:
+        animation_frames[0].save(output_path, **{k: v for k, v in save_kwargs.items() if k != "format"})
+
+    return buffer if return_bytes else animation_frames[0]
 
 def mythic_static(base_img):
     """Create a static mythic effect (for reference/testing)"""
@@ -438,15 +522,16 @@ def create_mythic_frame(base_img, glowy_color, pulse_intensity):
 
     return mythic_img
 
-def main(url):
-    result_frame = create_mythic_album_gif(
+def main(url, return_bytes=False):
+    """Generate the mythic GIF. Returns a BytesIO (GIF) when return_bytes=True,
+    otherwise the first PIL frame (and no longer writes to disk by default)."""
+    return create_mythic_album_gif(
         url=url,
-        output_path="mythic_animated.gif",
-        frames=60,  # More frames for smoother pulsing animation
-        duration=100  # Slightly slower for smoother appearance
+        output_path=None,
+        frames=30,
+        duration=100,
+        return_bytes=return_bytes,
     )
-
-    return result_frame
 
 
 # Example usage

@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Latest Pulls – Grails-Bot Admin{% endblock %}
+{% block content %}
+<h1>Latest Pulls</h1>
+
+<form method="get" class="inline-form">
+  <input type="number" name="n" value="{{ n }}" min="1" max="200">
+  <button type="submit">Refresh</button>
+</form>
+
+<table class="table">
+  <thead><tr><th>Song</th><th>Artist</th><th>Variant</th><th>Album</th><th>Collected At</th></tr></thead>
+  <tbody>
+    {% for id, song_name, artist, variant, album_name, collected_at in songs %}
+    <tr>
+      <td>{{ song_name }}</td>
+      <td>{{ artist }}</td>
+      <td>{{ variant }}</td>
+      <td>{{ album_name }}</td>
+      <td>{{ collected_at }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5" class="muted">No pulls yet.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>Undo Recent Pulls</h2>
+<form method="post" action="{{ url_for('users.remove_latest') }}"
+      onsubmit="return confirm('Remove the most recent pull(s) from the collection?');">
+  <input type="number" name="n" value="1" min="1" max="200">
+  <button type="submit" class="btn-danger">Remove most recent</button>
+</form>
+{% endblock %}

@@ -1,8 +1,25 @@
-requests>=2.28.0
-Pillow>=9.0.0
-numpy>=1.21.0
-discord-ext-menus>=1.1
 discord.py>=2.5.2
+discord-ext-menus>=1.1
+python-dotenv>=1.0.0
+requests>=2.28.0
+
+# Imaging
 Pillow>=10.1.0
+numpy>=1.21.0
+# Headless build: same cv2 API, but no libGL/X11 system dependency. The full
+# opencv-python fails to import on slim Linux hosts without extra apt packages,
+# and nothing here uses cv2's GUI functions.
+# Pinned below 5.0: the project has been running and tested on the 4.x line,
+# and a major-version bump buys nothing here (only 4 core cv2 calls are used).
+opencv-python-headless>=4.9.0,<5
+
+# Admin panel (local tool by default; see ENABLE_WEB_PANEL in bot.py)
+Flask>=3.0.0
+
+# Postgres backend, used when DATABASE_URL is set (e.g. Supabase).
+# Not needed for local SQLite runs, but harmless to install.
+psycopg[binary]>=3.1
+psycopg-pool>=3.2
+
+# Local dev only: auto-restart watcher used by main.py
 watchdog>=6.0.0
-opencv-python>=4.12.0.88

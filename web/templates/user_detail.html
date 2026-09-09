@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}{{ user.username or user.id }} – Grails-Bot Admin{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('users.index') }}">&laquo; All users</a></p>
+<h1>{{ user.username or user.id }}</h1>
+<p class="muted">ID: {{ user.id }}</p>
+
+<div class="stat-row">
+  <div class="stat-card"><div class="stat-value">{{ user.xp }}</div><div class="stat-label">XP</div></div>
+  <div class="stat-card"><div class="stat-value">{{ user.vinyl_count }}</div><div class="stat-label">Vinyl</div></div>
+  <div class="stat-card"><div class="stat-value">{{ user.sig_vinyl_count }}</div><div class="stat-label">Sig. Vinyl</div></div>
+</div>
+
+<div class="form-row">
+  <form method="post" action="{{ url_for('users.adjust_xp', user_id=user.id) }}" class="inline-form">
+    <input type="number" name="delta" placeholder="+/- XP" required>
+    <button type="submit">Apply XP</button>
+  </form>
+  <form method="post" action="{{ url_for('users.adjust_vinyl', user_id=user.id) }}" class="inline-form">
+    <input type="number" name="delta" placeholder="+/- Vinyl" required>
+    <button type="submit">Apply Vinyl</button>
+  </form>
+  <form method="post" action="{{ url_for('users.adjust_sig_vinyl', user_id=user.id) }}" class="inline-form">
+    <input type="number" name="delta" placeholder="+/- Sig. Vinyl" required>
+    <button type="submit">Apply Sig. Vinyl</button>
+  </form>
+</div>
+
+<h2>Collection ({{ collection|length }})</h2>
+<table class="table">
+  <thead><tr><th>Song</th><th>Artist</th><th>Variant</th><th>Album</th><th>Copy #</th></tr></thead>
+  <tbody>
+    {% for song_name, artist, variant, album_name, image, copy_number in collection %}
+    <tr>
+      <td>{{ song_name }}</td>
+      <td>{{ artist }}</td>
+      <td>{{ variant }}</td>
+      <td>{{ album_name }}</td>
+      <td>{{ copy_number }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5" class="muted">No songs collected yet.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>Danger Zone</h2>
+<form method="post" action="{{ url_for('users.unregister', user_id=user.id) }}"
+      onsubmit="return confirm('Unregister {{ user.username or user.id }}? This removes them from the users table.');">
+  <input type="hidden" name="confirm" value="yes">
+  <button type="submit" class="btn-danger">Unregister user</button>
+</form>
+{% endblock %}

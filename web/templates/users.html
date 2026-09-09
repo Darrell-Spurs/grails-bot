@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Users – Grails-Bot Admin{% endblock %}
+{% block content %}
+<h1>Users</h1>
+
+<form method="get" class="inline-form">
+  <input type="text" name="q" placeholder="Search by id or username..." value="{{ q }}">
+  <button type="submit">Search</button>
+</form>
+
+<table class="table">
+  <thead><tr><th>ID</th><th>Username</th><th>XP</th><th>Vinyl</th><th>Sig. Vinyl</th></tr></thead>
+  <tbody>
+    {% for id, username, xp, vinyl_count, sig_vinyl_count in users %}
+    <tr>
+      <td><a href="{{ url_for('users.detail', user_id=id) }}">{{ id }}</a></td>
+      <td>{{ username or '—' }}</td>
+      <td>{{ xp }}</td>
+      <td>{{ vinyl_count }}</td>
+      <td>{{ sig_vinyl_count }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5" class="muted">No users found.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

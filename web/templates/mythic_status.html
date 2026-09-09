@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Mythic Status – Grails-Bot Admin{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('mythic.index') }}">&laquo; Mythic hunt</a></p>
+<h1>Mythic Status: {{ song_id }}</h1>
+
+<div class="stat-row">
+  <div class="stat-card"><div class="stat-value">{{ info.current_copies }}/{{ info.max_copies }}</div><div class="stat-label">Copies Claimed</div></div>
+  <div class="stat-card"><div class="stat-value">{{ info.remaining_copies }}</div><div class="stat-label">Remaining</div></div>
+  <div class="stat-card"><div class="stat-value">{{ 'Yes' if info.can_collect else 'No' }}</div><div class="stat-label">Can Collect</div></div>
+</div>
+
+<h2>Owners</h2>
+<table class="table">
+  <thead><tr><th>User ID</th><th>Collected At</th></tr></thead>
+  <tbody>
+    {% for user_id, collected_at in owners %}
+    <tr><td><a href="{{ url_for('users.detail', user_id=user_id) }}">{{ user_id }}</a></td><td>{{ collected_at }}</td></tr>
+    {% else %}
+    <tr><td colspan="2" class="muted">No owners yet.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}
