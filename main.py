@@ -12,6 +12,7 @@ class RestartOnChange(FileSystemEventHandler):
         self.process = subprocess.Popen(self.command)
 
     def restart(self):
+        # return
         print("🔁 Restarting bot...")
         self.process.kill()
         self.process = subprocess.Popen(self.command)
@@ -33,7 +34,7 @@ if __name__ == "__main__":
     observer.schedule(event_handler, path=path, recursive=True)
     observer.start()
 
-    print("👀 Watching for changes...")
+    print("Watching for changes...")
     try:
         while True:
             time.sleep(1)

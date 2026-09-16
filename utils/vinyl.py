@@ -5,8 +5,9 @@ import os
 from urllib import response
 import requests
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter, ImageOps
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageOps
 from io import BytesIO
+from utils import aesthetics
 
 # Resolved from this file rather than the working directory, so signature art
 # still loads when the process is started from a different cwd.
@@ -81,22 +82,26 @@ def _specular_highlight(size: int, record_radius: int) -> Image.Image:
             cy + h//2 - int(0.65 * record_radius))
     d.ellipse(bbox, fill=255)
     mask = mask.rotate(-22, resample=Image.BICUBIC).filter(ImageFilter.GaussianBlur(16))
+
+    # Clip the streak to the record. The 16px blur pushes it past the rim at an
+    # alpha of about 9 -- invisible while the frame is still RGBA, but GIF has
+    # no partial transparency, so on export those faint pixels resolve to opaque
+    # near-black and print a dark smear on the background outside the disc.
+    # Reusing the disc's own soft-edged mask makes the highlight fade at the rim
+    # exactly as the record does, and because both are centred circles the clip
+    # survives the per-frame rotation about that same centre.
+    mask = ImageChops.multiply(mask, _circle_mask(size, record_radius, blur=0.8))
+
     # White highlight with low alpha
     highlight = Image.new("RGBA", (size, size), (255, 255, 255, 45))
     overlay.paste(highlight, (0, 0), mask)
     return overlay
 
 # ---- shared helpers (dedupe + precompute frame-invariant layers) ----
-_DISC_COLORS = {
-    "ultimate": "#FFE01A",
-    "legendary": "#FF9500",
-    "elite": "#D60A0A",
-    "unique": "#5E23E8",
-    "basic": "#0E4BD1",
-}
-
 def _colorize_disc(tex, rarity):
-    black = _DISC_COLORS.get(rarity, "#0D0D0D")
+    # Same hue as the shared palette, deepened: this is the dark end of a
+    # gradient running up to #3a3a3a, so a pastel here would invert the disc.
+    black = aesthetics.disc_color(rarity) if rarity in aesthetics.RARITY_COLOR else "#0D0D0D"
     return ImageOps.colorize(tex, black=black, white="#3a3a3a")
 
 def _build_static_vinyl_layers(size, rarity, label_ratio, hole_ratio):
@@ -135,24 +140,53 @@ def _build_static_vinyl_layers(size, rarity, label_ratio, hole_ratio):
         "highlight_base": _specular_highlight(size, record_radius),
     }
 
+# How much larger than its final size the label is rotated before being scaled
+# down. Rotating at the output size and rotating the full 500px cover look the
+# same once shrunk, but supersampling keeps the margin so a busy cover cannot
+# go soft.
+LABEL_SUPERSAMPLE = 2
+
+# The specular sheen turns by angle * 0.1 -- 35 degrees over a whole loop, in
+# steps under one degree, on an image that has already been through a 16px
+# Gaussian blur. Rotating it per frame was the single most expensive thing here
+# and produced differences invisible to the eye, so it is quantised to this many
+# distinct angles and each one is built once.
+HIGHLIGHT_STEPS = 8
+
+
 def _render_vinyl_frames(art, layers, num_frames, signature=None, sig_pos=None):
-    """Per frame: only rotate the label art + rotate the precomputed highlight."""
+    """Per frame: rotate the label art + reuse a cached highlight rotation.
+
+    The label used to be produced by rotating the full-size cover and then
+    scaling it down to the label circle, every frame -- rotating roughly nine
+    times the pixels that survive. The cover is scaled once up front instead.
+    """
     cx, cy = layers["cx"], layers["cy"]
     label_radius, label_mask = layers["label_radius"], layers["label_mask"]
     disc_base, overlay, highlight_base = layers["disc_base"], layers["overlay"], layers["highlight_base"]
+
+    label_size = label_radius * 2
+    source = art.resize((label_size * LABEL_SUPERSAMPLE,) * 2, Image.LANCZOS)
+    highlight_step = 36 / HIGHLIGHT_STEPS      # the sheen's full travel is 36 degrees
+    highlight_cache = {}
 
     frames = []
     for frame in range(num_frames):
         angle = (frame / num_frames) * 360
         canvas = disc_base.copy()
 
-        rotated_art = art.rotate(angle, resample=Image.BICUBIC, expand=False)
-        label = rotated_art.resize((label_radius * 2, label_radius * 2), Image.LANCZOS).convert("RGBA")
+        rotated = source.rotate(angle, resample=Image.BICUBIC, expand=False)
+        label = rotated.resize((label_size, label_size), Image.LANCZOS).convert("RGBA")
         label.putalpha(label_mask)
         canvas.paste(label, (cx - label_radius, cy - label_radius), label)
 
         canvas.alpha_composite(overlay)
-        canvas.alpha_composite(highlight_base.rotate(angle * 0.1, resample=Image.BICUBIC, expand=False))
+
+        bucket = round(angle * 0.1 / highlight_step)
+        if bucket not in highlight_cache:
+            highlight_cache[bucket] = highlight_base.rotate(
+                bucket * highlight_step, resample=Image.BICUBIC, expand=False)
+        canvas.alpha_composite(highlight_cache[bucket])
 
         if signature is not None:
             canvas.alpha_composite(signature, sig_pos)

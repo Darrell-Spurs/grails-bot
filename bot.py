@@ -17,9 +17,14 @@ sys.path.insert(0, PROJECT_ROOT)
 
 import discord
 from discord.ext import commands
-from db import init_db, user_exists, register_user
+from db import init_db, user_exists
+from utils import aesthetics
+from utils.command_types import NotRegistered, PrefixNotAllowed, SlashNotAllowed
+from utils.logsetup import event, setup_logging
 
-logging.basicConfig(level=logging.INFO)
+# Console gets the aligned, coloured format; the file gets the same layout with
+# the colour stripped, so a restart no longer erases the history.
+setup_logging(level=logging.INFO, logfile=os.path.join(PROJECT_ROOT, "logs", "grails.log"))
 log = logging.getLogger("grails.bot")
 
 init_db()
@@ -32,26 +37,156 @@ bot = commands.Bot(command_prefix='.', intents=intents, help_command=None)
 
 @bot.event
 async def on_ready():
-    log.info("Logged in as %s", bot.user)
+    event(log, "startup", "logged in as %s", bot.user)
+    _load_card_emojis()
+
+
+def _guild_card_emojis():
+    """The guild emoji whose names the palette actually asks for.
+
+    Unrelated server emoji are dropped here so the registry stays small and a
+    name collision with something else cannot shadow a card glyph.
+    """
+    wanted = aesthetics.wanted_emoji_names()
+    return {e.name.lower(): str(e) for e in bot.emojis if e.name.lower() in wanted}
+
+
+@bot.event
+async def on_guild_emojis_update(guild, before, after):
+    """Uploading or renaming an emoji takes effect without a restart."""
+    _load_card_emojis()
+
+
+def _load_card_emojis():
+    """Hand the guilds' custom emoji to the aesthetics module.
+
+    Runs on every ready (including reconnects) so an emoji uploaded while the
+    bot is live starts rendering without a restart. Only names the palette
+    actually asks for are kept, so unrelated server emoji cost nothing.
+    """
+    aesthetics.set_card_emoji_provider(_guild_card_emojis)
+    found = _guild_card_emojis()
+    aesthetics.set_card_emojis(found)
+    aesthetics.set_named_emojis(found)
+    event(log, "emoji ready", "%d of %d rarity/variant pairs resolved",
+             len(aesthetics.RARITY_ORDER) * len(aesthetics.VARIANTS)
+             - len(aesthetics.missing_card_emojis()),
+             len(aesthetics.RARITY_ORDER) * len(aesthetics.VARIANTS))
+
+    missing = aesthetics.missing_card_emojis()
+    if missing:
+        # Not an error: unresolved pairs fall back to unicode glyphs. Logged so
+        # the gap is visible instead of quietly showing the wrong thing.
+        log.warning("No custom emoji for %d rarity/variant pairs, e.g. %s",
+                    len(missing),
+                    ", ".join(f"{r}_{aesthetics.VARIANT_EMOJI_SUFFIX.get(v, v)}".rstrip("_")
+                              for r, v in missing[:5]))
+
+
+def _describe_param(value):
+    """Render one argument compactly for the invocation log."""
+    if isinstance(value, discord.abc.User):
+        return f"{value}({value.id})"
+    text = str(value)
+    return text if len(text) <= 60 else text[:57] + "..."
+
+
+@bot.event
+async def on_command(ctx):
+    """One line per invocation: what was run, how, and with what.
+
+    Fires for prefix commands and for hybrid commands used as slash commands,
+    since both are dispatched through a Context. A future pure
+    app_commands.command would not appear here -- it never builds a Context.
+    """
+    # ctx.args is [cog, ctx, *positional] inside a cog, [ctx, *positional]
+    # outside one. Keyword-only parameters arrive separately in ctx.kwargs.
+    start = 2 if ctx.command is not None and ctx.command.cog is not None else 1
+    params = [_describe_param(v) for v in (ctx.args or [])[start:] if v is not None]
+    params += [f"{k}={_describe_param(v)}" for k, v in (ctx.kwargs or {}).items() if v is not None]
+
+    event(log, "user_command",
+          "{command: %s, type: %s, param: %s}  by %s",
+          ctx.command.qualified_name if ctx.command else "?",
+          "slash" if ctx.interaction is not None else "prefix",
+          params,
+          ctx.author.name)
+
+
+# Commands that must work before you have an account, or that do not touch one.
+_NO_ACCOUNT_NEEDED = {"register", "help", "adminhelp", "ping"}
+
+# Admin tooling acts on *other* people's data, so gating it on the operator's
+# own player account would only get in the way.
+_ADMIN_CHECK_PREFIXES = ("has_role", "has_any_role", "has_permissions", "is_owner")
+
+
+def _is_admin_command(cmd):
+    return any(getattr(check, "__qualname__", "").startswith(_ADMIN_CHECK_PREFIXES)
+               for check in getattr(cmd, "checks", []))
 
 
 @bot.before_invoke
-async def _auto_register(ctx):
-    """Lazily register any user on their first command (prefix OR slash) so new
-    users never hit a 'not registered' wall."""
-    # Let the explicit .register command give its own welcome message.
-    if ctx.command and ctx.command.name == "register":
+async def _require_registration(ctx):
+    """Stop unregistered users at the door instead of registering them silently.
+
+    Accounts used to be created lazily on first command. They are not any more:
+    registering is what grants the signature vinyl welcome gift, so it has to be
+    a deliberate act. A database hiccup is not a reason to block play, so a
+    failed lookup lets the command through and the command's own checks decide.
+    """
+    if ctx.command is None or ctx.command.name in _NO_ACCOUNT_NEEDED:
+        return
+    if _is_admin_command(ctx.command):
         return
     try:
-        if not user_exists(ctx.author.id):
-            register_user(ctx.author.id, xp=0, username=ctx.author.name)
-            log.info("Auto-registered %s (%s)", ctx.author.name, ctx.author.id)
+        registered = user_exists(ctx.author.id)
     except Exception:
-        log.exception("auto-register failed for %s", ctx.author.id)
+        log.exception("registration check failed for %s", ctx.author.id)
+        return
+    if not registered:
+        raise NotRegistered()
+
+
+@bot.event
+async def on_command_error(ctx, error):
+    """Bot-wide fallback.
+
+    discord.py only reaches this for commands without their own handler, so it
+    complements the per-cog ones rather than replacing them. Two jobs: explain
+    that a slash-only command was typed with the prefix, and make sure nothing
+    else disappears silently.
+    """
+    if isinstance(error, PrefixNotAllowed):
+        # await ctx.send(f"Use `/{error.command_name}` — that one is a slash command.")
+        return
+    if isinstance(error, SlashNotAllowed):
+        # await ctx.send(f"Use `.{error.command_name}` — that one is a prefix command.")
+        return
+    if isinstance(error, NotRegistered):
+        await ctx.send("You need an account first — run **/register** to get "
+                       "started.")
+        return
+    if isinstance(error, commands.CommandNotFound):
+        return
+    if ctx.command and ctx.command.has_error_handler():
+        return          # the command already dealt with it
+    if isinstance(error, commands.CheckFailure):
+        await ctx.send("You can't use that command here.")
+        return
+
+    original = getattr(error, "original", error)
+    log.error("Unhandled error in .%s invoked by %s (%s): %s",
+              ctx.command, getattr(ctx.author, "id", "?"),
+              type(original).__name__, original, exc_info=original)
+    try:
+        await ctx.send("⚠️ Something went wrong. Please notify the developers.")
+    except Exception:
+        log.warning("Could not deliver the error notice")
 
 
 @bot.command(name="sync")
-@commands.has_role("bot_admin")
+@commands.has_role("grails-admin")
 async def sync_cmd(ctx):
     """Sync slash (app) commands to this server so they appear immediately."""
     ctx.bot.tree.copy_global_to(guild=ctx.guild)
@@ -62,7 +197,7 @@ async def sync_cmd(ctx):
 @sync_cmd.error
 async def sync_error(ctx, error):
     if isinstance(error, commands.MissingRole):
-        await ctx.send("❌ You need the 'bot_admin' role to sync commands.")
+        await ctx.send("❌ You need the 'grails-admin' role to sync commands.")
 
 
 @bot.event

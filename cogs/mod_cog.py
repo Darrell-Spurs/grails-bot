@@ -3,6 +3,8 @@ import discord
 from discord.ext import commands
 from math import ceil
 
+from utils import aesthetics
+
 class ModCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -36,7 +38,7 @@ class ModCog(commands.Cog):
                 color=discord.Color.blue()
             )
             for song in songs_on_page:
-                _, song_name, artist, variant, album_name, collected_at = song
+                _, song_name, artist, variant, album_name, collected_at = song[:6]
                 embed.add_field(
                     name=f"{song_name} - {artist}",
                     value=f"{variant} @ {collected_at}",
@@ -73,6 +75,39 @@ class ModCog(commands.Cog):
                 await ctx.send(f"❌ Failed to update XP for {user.mention}.")
         except Exception as e:
             await ctx.send(f"An error occurred: {e}")
+    @commands.command(aliases=['ec'])
+    @commands.has_role("grails-admin")
+    async def emojicheck(self, ctx):
+        """Show which rarity/variant card emoji the server is still missing.
+
+        Cards are drawn with a custom emoji per rarity+variant pair, resolved by
+        name at startup. Anything not uploaded falls back to a generic unicode
+        glyph, which is easy to miss -- this lists the exact names to upload.
+        """
+        resolved = aesthetics.registered_card_emojis()
+        missing = aesthetics.missing_card_emojis()
+        total = len(aesthetics.RARITY_ORDER) * len(aesthetics.VARIANTS)
+
+        embed = discord.Embed(
+            title="Card emoji coverage",
+            description=f"**{total - len(missing)} / {total}** pairs have a custom emoji.",
+            colour=discord.Colour.green() if not missing else discord.Colour.orange(),
+        )
+        if missing:
+            wanted = [aesthetics.card_emoji_names(r, v)[0] for r, v in missing]
+            # One field per chunk: Discord caps a field value at 1024 chars.
+            for i in range(0, len(wanted), 20):
+                embed.add_field(
+                    name="Missing" if i == 0 else "​",
+                    value=" ".join(f"`{n}`" for n in wanted[i:i + 20]),
+                    inline=False,
+                )
+            embed.set_footer(text="Upload these to the server, then run .sync or wait for the next reconnect.")
+        else:
+            sample = " ".join(list(resolved.values())[:12])
+            embed.add_field(name="Sample", value=sample or "​", inline=False)
+        await ctx.send(embed=embed)
+
 
 async def setup(bot):
     await bot.add_cog(ModCog(bot))

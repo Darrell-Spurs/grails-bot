@@ -3,6 +3,7 @@ import requests
 from io import BytesIO
 from collections import Counter
 import numpy as np
+import functools
 import math
 
 def get_dominant_color(image, resize=100):
@@ -194,12 +195,48 @@ def _compose_static_glow(base_img, glowy_color, intensity=0.8):
     return Image.alpha_composite(glow_layer, base_img)
 
 
+
+# How far apart the border is sampled. Each sample paints a segment this long,
+# so raising it trades a little gradient smoothness for a lot of Python work.
+_SAMPLE_STEP = 8
+
+
+# ---------------------------------------------------------------------------
+# Border colour cache
+#
+# _draw_wave_border asks for a colour once per sample, per layer, per side --
+# about 3,500 RGB<->HLS conversions a frame, or 100,000 for a whole GIF, and it
+# asks for the same handful of colours over and over as the wave sweeps round.
+# Quantising the factors to two decimals collapses that to a few hundred
+# distinct keys; the rounding is far below what a 24-bit channel can express, so
+# the pixels come out identical.
+#
+# The cache is keyed on the album's own glow colour, so two albums never share
+# an entry. maxsize bounds it across a long-running process.
+# ---------------------------------------------------------------------------
+@functools.lru_cache(maxsize=8192)
+def _cached_border_color(glowy_color, saturation_boost, enhanced_factor, enhanced_glow):
+    vibrant = make_color_vibrant(glowy_color, saturation_boost, enhanced_factor)
+    return make_color_glowy(vibrant, enhanced_factor, enhanced_glow)
+
+
+def _border_color(glowy_color, saturation_boost, enhanced_factor, enhanced_glow):
+    return _cached_border_color(tuple(glowy_color), round(saturation_boost, 2),
+                                round(enhanced_factor, 2), round(enhanced_glow, 2))
+
+
 def _draw_wave_border(mythic_img, glowy_color, progress):
     """Draw the animated counter-clockwise wave border onto `mythic_img` in place.
     This is the only part that changes between frames."""
     frame_draw = ImageDraw.Draw(mythic_img)
     width, height = mythic_img.size
-    border_thickness = 12
+    border_thickness = 10
+
+    # The border is sampled every STEP pixels and each sample draws a segment
+    # STEP long. The two must stay tied together: with a step wider than the
+    # segment, the segments stop touching and the border breaks into stripes.
+    step = _SAMPLE_STEP
+    seg = step - 1
 
     perimeter = 2 * (width + height - 4)
     wave_length = perimeter / 1.5
@@ -232,8 +269,18 @@ def _draw_wave_border(mythic_img, glowy_color, progress):
                 start_pos, end_pos, x_coord = 2 * width + height - 3, perimeter, border_layer
 
             side_length = end_pos - start_pos
-            for i in range(max(1, side_length // 4)):
-                sample_pos = start_pos + (i * 4) % side_length
+
+            # Walk each side over its own pixel span rather than over the
+            # perimeter arithmetic above. The four side_lengths do not add up to
+            # four full edges -- the left one comes out five short -- and
+            # floor division then dropped the final partial segment, so every
+            # edge stopped a few pixels before its corner and the top-left
+            # corner was left with a visible notch. Ceiling division over the
+            # true span puts the last segment on the corner instead.
+            span = width if side in ('top', 'bottom') else height
+            for i in range(max(1, -(-span // step))):
+                offset = min(i * step, span - 1)
+                sample_pos = (start_pos + offset) % perimeter
                 intensity = calculate_wave_intensity(sample_pos + layer_offset)
 
                 if intensity < 0.6:
@@ -247,24 +294,24 @@ def _draw_wave_border(mythic_img, glowy_color, progress):
                     enhanced_glow = 0.6 + transition_factor * 0.2
                     saturation_boost = 1.2 + transition_factor * 0.3
 
-                vibrant_color = make_color_vibrant(glowy_color, saturation_boost, enhanced_factor)
-                border_color = make_color_glowy(vibrant_color, enhanced_factor, enhanced_glow)
+                border_color = _border_color(glowy_color, saturation_boost,
+                                             enhanced_factor, enhanced_glow)
                 alpha = int(255 * (0.8 + intensity * 0.2))
                 color = border_color + (alpha,)
                 line_w = 2 if border_layer < 8 else 1
 
                 if side == 'top':
-                    px = start_pos + i * 4
-                    frame_draw.line([(px, y_coord), (min(px + 3, width - 1), y_coord)], fill=color, width=line_w)
+                    px = offset
+                    frame_draw.line([(px, y_coord), (min(px + seg, width - 1), y_coord)], fill=color, width=line_w)
                 elif side == 'right':
-                    py = start_pos - width + 1 + i * 4
-                    frame_draw.line([(x_coord, py), (x_coord, min(py + 3, height - 1))], fill=color, width=line_w)
+                    py = offset
+                    frame_draw.line([(x_coord, py), (x_coord, min(py + seg, height - 1))], fill=color, width=line_w)
                 elif side == 'bottom':
-                    px = width - 1 - (i * 4)
-                    frame_draw.line([(max(px - 3, 0), y_coord), (px, y_coord)], fill=color, width=line_w)
+                    px = width - 1 - offset
+                    frame_draw.line([(max(px - seg, 0), y_coord), (px, y_coord)], fill=color, width=line_w)
                 else:
-                    py = height - 1 - (i * 4)
-                    frame_draw.line([(x_coord, max(py - 3, 0)), (x_coord, py)], fill=color, width=line_w)
+                    py = height - 1 - offset
+                    frame_draw.line([(x_coord, max(py - seg, 0)), (x_coord, py)], fill=color, width=line_w)
     return mythic_img
 
 
@@ -311,216 +358,6 @@ def create_mythic_album_gif(url, output_path=None, frames=30, duration=100, size
         animation_frames[0].save(output_path, **{k: v for k, v in save_kwargs.items() if k != "format"})
 
     return buffer if return_bytes else animation_frames[0]
-
-def mythic_static(base_img):
-    """Create a static mythic effect (for reference/testing)"""
-    # Get the glowy color from the album image
-    dominant_color = get_dominant_color(base_img)
-    glowy_color = make_color_glowy(dominant_color)
-    
-    # Create glow layer
-    glow_layer = Image.new("RGBA", base_img.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(glow_layer)
-    center = (base_img.width // 2, base_img.height // 2)
-    max_radius = 250
-
-    for r in range(250, 0, -10):
-        alpha = int(255 * (r / max_radius) * 0.15)
-        draw.ellipse(
-            [center[0]-r, center[1]-r, center[0]+r, center[1]+r],
-            fill=glowy_color + (alpha,)  # Use glowy color instead of gold
-        )
-
-    glow_layer = glow_layer.filter(ImageFilter.GaussianBlur(15))
-    mythic_img = Image.alpha_composite(glow_layer, base_img)
-
-    # Draw border using glowy color
-    frame_draw = ImageDraw.Draw(mythic_img)
-    for i in range(6):
-        frame_draw.rectangle(
-            [i, i, mythic_img.width - i - 1, mythic_img.height - i - 1],
-            outline=glowy_color + (255,)  # Use glowy color for border
-        )
-
-    return mythic_img
-
-def create_mythic_frame_gradient(base_img, glowy_color, pulse_intensity, progress):
-    """Create a single frame with gradient border effect"""
-    # Create glow layer with animated intensity
-    glow_layer = Image.new("RGBA", base_img.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(glow_layer)
-    center = (base_img.width // 2, base_img.height // 2)
-    max_radius = 250
-
-    for r in range(250, 0, -10):
-        # Vary alpha based on pulse intensity
-        base_alpha = 255 * (r / max_radius) * 0.15
-        animated_alpha = int(base_alpha * pulse_intensity)
-        draw.ellipse(
-            [center[0]-r, center[1]-r, center[0]+r, center[1]+r],
-            fill=glowy_color + (animated_alpha,)
-        )
-
-    glow_layer = glow_layer.filter(ImageFilter.GaussianBlur(15))
-    mythic_img = Image.alpha_composite(glow_layer, base_img)
-
-    # Draw animated counterclockwise wave border
-    frame_draw = ImageDraw.Draw(mythic_img)
-    width, height = mythic_img.size
-    border_thickness = 12 # Reduced to 2/3 of 16 (about 10.67, rounded to 11)
-    
-    # Calculate perimeter positions for wave animation
-    perimeter = 2 * (width + height - 4)  # Total perimeter length
-    wave_length = perimeter / 1.5  # Wave covers 2/3 of perimeter (longer bright area)
-    wave_position = (progress * perimeter) % perimeter  # Smooth continuous movement around full perimeter
-    
-    def get_position_on_perimeter(pos):
-        """Convert linear position to (x, y) coordinates on rectangle perimeter"""
-        pos = pos % perimeter
-        if pos < width:  # Top edge
-            return (int(pos), 0)
-        elif pos < width + height - 1:  # Right edge
-            return (width - 1, int(pos - width + 1))
-        elif pos < 2 * width + height - 2:  # Bottom edge
-            return (int(width - 1 - (pos - width - height + 1)), height - 1)
-        else:  # Left edge
-            return (0, int(height - 1 - (pos - 2 * width - height + 2)))
-    
-    def calculate_wave_intensity(pos):
-        """Calculate intensity based on distance from wave center with bright-dark-bright gradient"""
-        # Distance from wave center (considering circular nature)
-        dist1 = abs(pos - wave_position)
-        dist2 = perimeter - dist1  # Distance going the other way around
-        distance = min(dist1, dist2)
-        
-        # Create smooth bright-to-vibrant wave effect
-        if distance <= wave_length / 2:
-            # Within wave: create smooth gradient using a softer cosine curve
-            wave_factor = math.cos(math.pi * distance / (wave_length / 2))
-            
-            # Create smoother bright-to-vibrant gradient pattern
-            if wave_factor >= 0:
-                # Bright to medium (center to edges) - smoother transition
-                smooth_factor = wave_factor ** 0.7  # Softer curve for positive values
-                base_intensity = 0.6  # Higher base for more bright area
-                peak_intensity = 1.0   # Very bright peak
-                return base_intensity + (peak_intensity - base_intensity) * smooth_factor
-            else:
-                # Medium to vibrant (very gradual transition)
-                smooth_factor = (abs(wave_factor)) ** 1.2  # Even softer transition for negative values
-                medium_intensity = 0.6  # Higher medium
-                vibrant_intensity = 0.3   # Vibrant but not too dark
-                return medium_intensity - (medium_intensity - vibrant_intensity) * smooth_factor
-        else:
-            return 0.4  # Slightly vibrant base outside wave
-    
-    # Create border layers with wave animation
-    for border_layer in range(border_thickness):
-        layer_offset = border_layer * 0.1  # Slight offset for depth
-        
-        # Draw each side of the border with wave-based intensity
-        for side in ['top', 'right', 'bottom', 'left']:
-            if side == 'top':
-                start_pos = 0
-                end_pos = width - 1
-                y_coord = border_layer
-            elif side == 'right':
-                start_pos = width - 1
-                end_pos = width + height - 2
-                x_coord = width - 1 - border_layer
-            elif side == 'bottom':
-                start_pos = width + height - 2
-                end_pos = 2 * width + height - 3
-                y_coord = height - 1 - border_layer
-            else:  # left
-                start_pos = 2 * width + height - 3
-                end_pos = perimeter
-                x_coord = border_layer
-            
-            # Sample multiple points along this side for smooth gradient
-            side_length = end_pos - start_pos
-            for i in range(max(1, side_length // 4)):  # Sample every 4 pixels for performance
-                sample_pos = start_pos + (i * 4) % side_length
-                intensity = calculate_wave_intensity(sample_pos + layer_offset)
-                
-                # Create smoother color transitions
-                if intensity < 0.6:
-                    # For vibrant areas: smoother transition with gradual saturation boost
-                    transition_factor = intensity / 0.6  # Normalize to 0-1 for smooth transition
-                    enhanced_factor = 0.7 + transition_factor * 0.5  # Range: 0.7 to 1.2 (smoother)
-                    enhanced_glow = 0.3 + transition_factor * 0.3    # Range: 0.3 to 0.6 (gradual saturation)
-                    # Gradual saturation boost
-                    saturation_boost = 1.8 + transition_factor * 0.4  # Range: 1.8 to 2.2 (smoother boost)
-                else:
-                    # For bright areas: smooth transition to very bright
-                    transition_factor = (intensity - 0.6) / 0.4  # Normalize remaining range
-                    enhanced_factor = 1.2 + transition_factor * 2.8  # Range: 1.2 to 4.0 (very bright)
-                    enhanced_glow = 0.6 + transition_factor * 0.2    # Range: 0.6 to 0.8 (good saturation)
-                    saturation_boost = 1.2 + transition_factor * 0.3  # Range: 1.2 to 1.5 (moderate boost)
-                
-                # Apply smooth saturation boost for all areas
-                vibrant_color = make_color_vibrant(glowy_color, saturation_boost, enhanced_factor)
-                border_color = make_color_glowy(vibrant_color, enhanced_factor, enhanced_glow)
-                
-                alpha = int(255 * (0.8 + intensity * 0.2))  # High visibility: range 80% to 100% alpha
-                color = border_color + (alpha,)
-                
-                # Calculate actual pixel coordinates
-                if side == 'top':
-                    pixel_x = start_pos + i * 4
-                    pixel_y = y_coord
-                    # Draw small segment
-                    frame_draw.line([(pixel_x, pixel_y), (min(pixel_x + 3, width - 1), pixel_y)], 
-                                   fill=color, width=2 if border_layer < 8 else 1)
-                elif side == 'right':
-                    pixel_x = x_coord
-                    pixel_y = start_pos - width + 1 + i * 4
-                    frame_draw.line([(pixel_x, pixel_y), (pixel_x, min(pixel_y + 3, height - 1))], 
-                                   fill=color, width=2 if border_layer < 8 else 1)
-                elif side == 'bottom':
-                    pixel_x = width - 1 - (i * 4)
-                    pixel_y = y_coord
-                    frame_draw.line([(max(pixel_x - 3, 0), pixel_y), (pixel_x, pixel_y)], 
-                                   fill=color, width=2 if border_layer < 8 else 1)
-                else:  # left
-                    pixel_x = x_coord
-                    pixel_y = height - 1 - (i * 4)
-                    frame_draw.line([(pixel_x, max(pixel_y - 3, 0)), (pixel_x, pixel_y)], 
-                                   fill=color, width=2 if border_layer < 8 else 1)
-
-    return mythic_img
-
-def create_mythic_frame(base_img, glowy_color, pulse_intensity):
-    """Create a single frame of the mythic effect"""
-    # Create glow layer with animated intensity
-    glow_layer = Image.new("RGBA", base_img.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(glow_layer)
-    center = (base_img.width // 2, base_img.height // 2)
-    max_radius = 250
-
-    for r in range(250, 0, -10):
-        # Vary alpha based on pulse intensity
-        base_alpha = 255 * (r / max_radius) * 0.15
-        animated_alpha = int(base_alpha * pulse_intensity)
-        draw.ellipse(
-            [center[0]-r, center[1]-r, center[0]+r, center[1]+r],
-            fill=glowy_color + (animated_alpha,)
-        )
-
-    glow_layer = glow_layer.filter(ImageFilter.GaussianBlur(15))
-    mythic_img = Image.alpha_composite(glow_layer, base_img)
-
-    # Draw animated border
-    frame_draw = ImageDraw.Draw(mythic_img)
-    border_alpha = int(255 * (0.7 + 0.3 * pulse_intensity))  # Pulsing border opacity
-    
-    for i in range(6):
-        frame_draw.rectangle(
-            [i, i, mythic_img.width - i - 1, mythic_img.height - i - 1],
-            outline=glowy_color + (border_alpha,)
-        )
-
-    return mythic_img
 
 def main(url, return_bytes=False):
     """Generate the mythic GIF. Returns a BytesIO (GIF) when return_bytes=True,

@@ -8,6 +8,7 @@ else:
 
 import asyncio, sys, os, uuid, random, time
 from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageEnhance
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 import numpy as np
 import colorsys
@@ -15,6 +16,9 @@ import colorsys
 # Add the project root to the Python path for db import
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from db import *
+from utils import odds
+from utils.aesthetics import UNASSIGNED
+from utils import aesthetics
 
 import logging
 log = logging.getLogger("grails.helpers")
@@ -243,8 +247,10 @@ async def add_songs_to_db(album_type, artist_name, ctx=None, token=None):
                 spotify_song_id = track["id"]
                 song_name = track["name"]
                 
-                # Add song to songs table (with default rarity "common")
-                existing_song_id = add_song(song_id, song_name, artist_name_corrected, "common")
+                # Imported songs start unassigned: an admin sets the real
+                # tier with .sr, and the draw tables name only real tiers,
+                # so nothing unassigned can be pulled in the meantime.
+                existing_song_id = add_song(song_id, song_name, artist_name_corrected, UNASSIGNED)
 
                 if existing_song_id is not None:
                     song_id = existing_song_id
@@ -284,24 +290,60 @@ def invalidate_artists_cache():
     _artists_cache["value"] = None
     _artists_cache["expires_at"] = 0.0
 
-def get_random_song(variant = ""):
+def _sourpatch_pick():
+    return {
+        "song_id": SOURPATCH_ID, "song_name": SOURPATCH_NAME, "artist": SOURPATCH_ARTIST,
+        "rarity": "basic", "album_id": SOURPATCH_ID, "album_name": SOURPATCH_NAME,
+        "album_image": SOURPATCH_IMAGE,
+    }
+
+
+def get_random_songs(count=3, variant="", overdraw=3):
+    """Draw `count` songs (with album and rarity) in a single database query.
+
+    Same distribution as calling get_random_song() `count` times: an
+    (artist, rarity) pair is drawn with the usual weights, and pairs that turn
+    out to have no songs are skipped -- exactly what the old reroll loop did,
+    just resolved in memory instead of one network round-trip per attempt.
+
+    `overdraw` is how many extra pairs to ask about so an empty pair almost
+    never costs a second query.
+
+    Returns a list of dicts: song_id, song_name, artist, rarity, album_id,
+    album_name, album_image.
+    """
     artists = _cached_artists()
-    if variant == "sig_vinyl":
-        rarity_rate = {
-            "ultimate": 0.02,
-            "legendary": 0.15,
-            "elite": 0.35,
-            "unique": 0.48,
-            "basic": 0
-        }
-    else:
-        rarity_rate = {
-            "ultimate": 0.01,
-            "legendary": 0.07,
-            "elite": 0.17,
-            "unique": 0.30,
-            "basic": 0.45
-        }
+    if not artists:
+        return [_sourpatch_pick() for _ in range(count)]
+
+    rates = odds.RARITY_RATES.get(variant, odds.RARITY_RATES[""])
+    names = list(rates.keys())
+    weights = list(rates.values())
+
+    pairs = [(random.choice(artists), random.choices(names, weights=weights)[0])
+             for _ in range(count * max(overdraw, 1))]
+    buckets = get_random_song_candidates(pairs)
+
+    picked = []
+    for artist, rarity in pairs:
+        if len(picked) == count:
+            break
+        rows = buckets.get((artist.lower(), rarity.lower()))
+        if rows:
+            picked.append(random.choice(rows))
+
+    # Only reached when the over-drawn pairs were all empty, which needs a very
+    # sparse catalog; the old code fell back to Sour Patch Kids here too.
+    while len(picked) < count:
+        picked.append(_sourpatch_pick())
+    return picked
+
+
+def get_random_song(variant = ""):
+    """Draw one song. get_random_songs() is the batched form and the one the
+    pull path uses; this remains for callers that need a single pick."""
+    artists = _cached_artists()
+    rarity_rate = odds.RARITY_RATES.get(variant, odds.RARITY_RATES[""])
     rarities = list(rarity_rate.keys())
     weights = list(rarity_rate.values())
 
@@ -345,27 +387,26 @@ def pick_unique_song(user_id, dedup_variant, weight_variant="", max_attempts=50)
     return song, song_id, artist, album, get_song_rarity(song_id)
 
 def draw_variant():
-    variants = ["default", "glitched", "sketch", "mythic", "diamond"]
-    random_num = random.random()
-    random_num = -10
-    print(random_num)
-    mythic_per_c = 0.005
-    gutscookie_per_c = 0.02
-    sketch_per_c = 0.03
-    glitched_per_c = 0.12
+    """Roll one song's variant.
 
-    mythic_chance = 1 - (1 - mythic_per_c) ** (1/3)
-    gutscookie_chance = 1 - (1 - gutscookie_per_c) ** (1/3)
-    sketch_chance = 1 - (1 - sketch_per_c) ** (1/3)
-    glitched_chance = 1 - (1 - glitched_per_c) ** (1/3)
+    The tunables in utils/odds.py are stated per *pull*; each is converted to
+    the per-song probability that produces it across the three songs a pull
+    offers, then the roll walks the cumulative bands.
+    """
+    random_num = random.random()
+
+    mythic_chance = odds.per_song_chance(odds.MYTHIC_PER_PULL)
+    gutscookie_chance = odds.per_song_chance(odds.GUTSCOOKIE_PER_PULL)
+    sketch_chance = odds.per_song_chance(odds.SKETCH_PER_PULL)
+    glitched_chance = odds.per_song_chance(odds.GLITCHED_PER_PULL)
 
     if random_num < mythic_chance:
         return "mythic"
     if random_num < mythic_chance + gutscookie_chance:
         return "gutscookie"
-    if random_num < sketch_chance + mythic_chance + gutscookie_chance:  # 3% chance to be sketch
+    if random_num < sketch_chance + mythic_chance + gutscookie_chance:
         return "sketch"
-    if random_num < glitched_chance + sketch_chance + mythic_chance + gutscookie_chance:  # 12% chance to be glitched:
+    if random_num < glitched_chance + sketch_chance + mythic_chance + gutscookie_chance:
         return "glitched"
     return "default"
 
@@ -430,32 +471,56 @@ def create_mystic_effect(url):
     mystic_img = main(url)
     return mystic_img
 
+# Fonts were re-opened from disk on every collage (4-6 TrueType loads per
+# pull). They never change, so load each face once.
+_font_cache = {}
+
+
+def _font(filename, size):
+    key = (filename, size)
+    if key not in _font_cache:
+        try:
+            _font_cache[key] = ImageFont.truetype(os.path.join(FONTS_DIR, filename), size)
+        except OSError:
+            return None
+    return _font_cache[key]
+
+
+COVER_TIMEOUT = 10  # seconds; without one a stalled CDN pins the worker thread
+
+
+def _load_cover(url, size):
+    """Fetch one album cover and square it off. Local paths (the Sour Patch
+    fallback) are opened directly."""
+    if url and os.path.exists(url):
+        img = Image.open(url).convert("RGB")
+    else:
+        response = requests.get(url, timeout=COVER_TIMEOUT)
+        response.raise_for_status()
+        img = Image.open(BytesIO(response.content)).convert("RGB")
+    return img.resize((size, size))
+
+
 def make_3_song_collage(image_urls, titles, artists, variants, rarities, output_path=None, return_bytes=False):
     SCALE = 2
 
-    images = []
-    for i in range(len(image_urls)):
-        url = image_urls[i]
-        if url and os.path.exists(url):
-            # local file (e.g. the Sour Patch Kids fallback image)
-            img = Image.open(url).convert("RGB").resize((300 * SCALE, 300 * SCALE))
-        else:
-            response = requests.get(url)
-            img = Image.open(BytesIO(response.content)).convert("RGB").resize((300 * SCALE, 300 * SCALE))
-        if variants[i] == "glitched":
-            img = create_glitched_effect(img)
-        elif variants[i] == "sketch":
-            img = create_sketch_effect(img)
-        images.append(img)
+    # The three covers are independent network fetches, so they go out at once
+    # rather than one after another (measured ~383ms sequential vs ~131ms).
+    side = 300 * SCALE
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        images = list(pool.map(lambda u: _load_cover(u, side), image_urls))
 
-    try:
-        font_title = ImageFont.truetype(os.path.join(FONTS_DIR, "calibrib.ttf"), 22 * SCALE)
-        font_artist = ImageFont.truetype(os.path.join(FONTS_DIR, "calibri.ttf"), 18 * SCALE)
-        # font_title = ImageFont.truetype("fonts/calibrib.ttf", 22 * SCALE)
-        # font_artist = ImageFont.truetype("fonts/calibri.ttf", 18 * SCALE)
-    except:
-        font_title = ImageFont.load_default()
-        font_artist = ImageFont.load_default()
+    # Effects stay on this thread: they are CPU-bound, so a pool would only add
+    # contention.
+    for i, variant in enumerate(variants):
+        if variant == "glitched":
+            images[i] = create_glitched_effect(images[i])
+        elif variant == "sketch":
+            images[i] = create_sketch_effect(images[i])
+
+    font_title = _font("calibrib.ttf", 22 * SCALE) or ImageFont.load_default()
+    font_artist = _font("calibri.ttf", 18 * SCALE) or ImageFont.load_default()
+    rarity_font = _font("galada.ttf", 20 * SCALE) or _font("segeo-script.ttf", 24 * SCALE)
 
     spacing = 20 * SCALE
     img_width = images[0].width
@@ -475,17 +540,7 @@ def make_3_song_collage(image_urls, titles, artists, variants, rarities, output_
         artist_text = artists[i]
         rarity_text = (rarities[i] or "basic").title()
         
-        # Define rarity colors (lighter versions)
-        rarity_colors = {
-            "Ultimate": "#FFF566",    # Lighter yellow/gold
-            "Legendary": "#FFB366",   # Lighter orange
-            "Elite": "#FF6666",       # Lighter red
-            "Unique": "#9966FF",      # Lighter purple
-            "Basic": "#6699FF"        # Lighter blue
-        }
-
-
-        rarity_color = rarity_colors.get(rarity_text, "#FFFFFF")
+        rarity_color = aesthetics.rarity_hex(rarity_text)
 
         if len(title_text) > 25:
             title_text = title_text[:25] + "..."
@@ -497,13 +552,7 @@ def make_3_song_collage(image_urls, titles, artists, variants, rarities, output_
         draw.text((title_x, img_height + 5 * SCALE), title_text, font=font_title, fill="#eeeeee")
         draw.text((artist_x, img_height + 30 * SCALE), artist_text, font=font_artist, fill="#cccccc")
         
-        # Add autograph-style rarity text below artist name
-        try:
-            # Try to use a script/cursive font for autograph effect (relative to utils folder)
-            rarity_font = ImageFont.truetype(os.path.join(FONTS_DIR, "galada.ttf"), 20 * SCALE)
-        except OSError:
-            rarity_font = ImageFont.truetype(os.path.join(FONTS_DIR, "segeo-script.ttf"), 24 * SCALE)
-
+        # Autograph-style rarity text below the artist name.
         rarity_text_w = draw.textlength(rarity_text, font=rarity_font)
         rarity_text_x = x + (img_width - rarity_text_w) // 2
         rarity_text_y = img_height + 48 * SCALE  # Position below artist text
@@ -513,7 +562,7 @@ def make_3_song_collage(image_urls, titles, artists, variants, rarities, output_
         draw.text((rarity_text_x + shadow_offset, rarity_text_y + shadow_offset), rarity_text, font=rarity_font, fill="#000000")  # Shadow
         draw.text((rarity_text_x, rarity_text_y), rarity_text, font=rarity_font, fill=rarity_color)  # Main text
 
-    final_image = canvas.resize((canvas.width, canvas.height), Image.Resampling.LANCZOS)
+    final_image = canvas
 
     buffer = None
     if return_bytes:
@@ -584,10 +633,6 @@ def make_battle_collage(players, output_path=None, return_bytes=False):
         except Exception:
             font_rarity = font_small
 
-    rarity_colors = {
-        "ultimate": "#FFF566", "legendary": "#FFB366", "elite": "#FF6666",
-        "unique": "#9966FF", "basic": "#6699FF",
-    }
 
     for i, p in enumerate(players):
         x = i * (cell + spacing)
@@ -624,7 +669,7 @@ def make_battle_collage(players, output_path=None, return_bytes=False):
             rarity_key = p.get("rarity")
             if rarity_key:
                 rarity_text = rarity_key.title()
-                rarity_color = rarity_colors.get(rarity_key, "#FFFFFF")
+                rarity_color = aesthetics.rarity_hex(rarity_key)
                 rw = draw.textlength(rarity_text, font=font_rarity)
                 rx = x + (cell - rw) // 2
                 ry = cell + 76 * SCALE

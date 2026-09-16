@@ -1,15 +1,18 @@
 import os
 import logging
 import secrets
+from datetime import datetime
 
 from flask import Flask, session, request, redirect, url_for
 
+from utils import aesthetics
 from web.auth import auth_bp
 from web.blueprints.health import health_bp
 from web.blueprints.dashboard import dashboard_bp
 from web.blueprints.catalog import catalog_bp
 from web.blueprints.users import users_bp
 from web.blueprints.mythic import mythic_bp
+from web.blueprints.odds import odds_bp
 
 # Endpoints reachable without a login
 PUBLIC_ENDPOINTS = {"auth.login", "health.health", "static"}
@@ -36,12 +39,47 @@ def create_app(bot=None):
     app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
     app.bot = bot
 
+    # Jinja *globals*, not a context processor: macros imported with
+    # `{% from "_macros.html" import ... %}` do not receive the calling
+    # template's context, so a context processor is invisible inside them.
+    # Globals are visible everywhere, including imported macros.
+    app.jinja_env.globals.update(
+        RARITY_ORDER=aesthetics.RARITY_ORDER,
+        UNASSIGNED=aesthetics.UNASSIGNED,
+        RARITY_COLOR=aesthetics.RARITY_COLOR,
+        VARIANTS=aesthetics.VARIANTS,
+        VARIANT_LABEL=aesthetics.VARIANT_LABEL,
+        VARIANT_COLOR=aesthetics.VARIANT_COLOR,
+        palette_css=aesthetics.css_variables(indent="      "),
+    )
+
+    @app.template_filter("moment")
+    def _moment(value):
+        """Render a collected_at value as 'YYYY-MM-DD HH:MM'.
+
+        Postgres hands back a datetime and SQLite a string, and the raw value
+        carries microseconds that are noise in a table. Anything unparseable is
+        passed through untouched rather than swallowed.
+        """
+        if value is None:
+            return "—"
+        if isinstance(value, datetime):
+            return value.strftime("%Y-%m-%d %H:%M")
+        text = str(value)
+        for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                return datetime.strptime(text, fmt).strftime("%Y-%m-%d %H:%M")
+            except ValueError:
+                continue
+        return text
+
     app.register_blueprint(auth_bp)
     app.register_blueprint(health_bp)
     app.register_blueprint(dashboard_bp)
     app.register_blueprint(catalog_bp)
     app.register_blueprint(users_bp)
     app.register_blueprint(mythic_bp)
+    app.register_blueprint(odds_bp)
 
     @app.before_request
     def require_login():

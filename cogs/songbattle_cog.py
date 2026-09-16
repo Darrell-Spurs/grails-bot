@@ -15,6 +15,7 @@ from db import (add_song_to_collection, get_song_rarity, get_user_xp, add_user_x
                 user_exists, register_user)
 from utils.helpers import (get_random_song, get_random_album, make_battle_collage,
                            load_square_thumbnail, SOURPATCH_ID)
+from utils.command_types import slash_only
 
 log = logging.getLogger("grails.songbattle")
 
@@ -61,6 +62,7 @@ class SongBattleCog(commands.Cog):
 
     @commands.hybrid_command(name="songbattle", aliases=["sb"],
                              description="Start a multiplayer song-pull battle (2-5 players)")
+    @slash_only()
     @app_commands.describe(rounds=f"First to how many round-wins takes the match? ({MIN_ROUNDS}-{MAX_ROUNDS}, default {DEFAULT_ROUNDS})")
     async def songbattle(self, ctx, rounds: app_commands.Range[int, MIN_ROUNDS, MAX_ROUNDS] = DEFAULT_ROUNDS):
         """Start a song battle. Players react to join, pull order is randomized, then each
@@ -78,7 +80,7 @@ class SongBattleCog(commands.Cog):
         else:
             raise error
 
-    @commands.hybrid_command(name="battle", aliases=["b"], description="Pull your song when it's your turn in a Song Battle")
+    @commands.command(name="battle", aliases=["b"], description="Pull your song when it's your turn in a Song Battle")
     async def battle_pull(self, ctx):
         """Reveal your pull in the active Song Battle in this channel, if it's your turn."""
         session = self.active_battles.get(ctx.channel.id)
@@ -106,7 +108,7 @@ class SongBattleCog(commands.Cog):
             is_last = session["turn"] >= len(slots)
 
             if not is_last:
-                round_title = f"🎶 Song Battle — Round {session['round_num']}"
+                round_title = f"Song Battle — Round {session['round_num']}"
                 next_player = slots[session["turn"]]["member"]
                 await self._update_battle_canvas(
                     session["msg"], slots,

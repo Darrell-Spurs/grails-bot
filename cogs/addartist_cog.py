@@ -18,7 +18,7 @@ class AddArtistCog(commands.Cog):
         self.bot = bot
 
     @commands.command(aliases=['aa'])
-    @commands.has_role("bot_admin")
+    @commands.has_role("grails-admin")
     async def addartist(self, ctx, *, artist_name: str):
         """Add an artist's albums and songs to the database
         Usage: .addartist <Artist Name>
@@ -99,7 +99,7 @@ class AddArtistCog(commands.Cog):
     async def addartist_error(self, ctx, error):
         if isinstance(error, commands.MissingRole):
             await ctx.send(
-                "❌ You need the 'bot_admin' role to use this command!")
+                "❌ You need the 'grails-admin' role to use this command!")
         elif isinstance(error, commands.MissingRequiredArgument):
             await ctx.send("❌ **Missing artist name!**\n"
                            "**Usage:** `.addartist <Artist Name>`\n"
@@ -109,7 +109,7 @@ class AddArtistCog(commands.Cog):
             raise error
 
     @commands.command(aliases=['ra'])
-    @commands.has_role("bot_admin")
+    @commands.has_role("grails-admin")
     async def removeartist(self, ctx, *, artist_name: str):
         """Remove an artist and all their songs/albums from the database
         Usage: .removeartist <Artist Name>
@@ -287,7 +287,7 @@ class AddArtistCog(commands.Cog):
     async def removeartist_error(self, ctx, error):
         if isinstance(error, commands.MissingRole):
             await ctx.send(
-                "❌ You need the 'bot_admin' role to use this command!")
+                "❌ You need the 'grails-admin' role to use this command!")
         elif isinstance(error, commands.MissingRequiredArgument):
             await ctx.send("❌ **Missing artist name!**\n"
                            "**Usage:** `.removeartist <Artist Name>`\n"

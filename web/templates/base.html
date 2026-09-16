@@ -3,37 +3,138 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="robots" content="noindex, nofollow">
   <title>{% block title %}Grails-Bot Admin{% endblock %}</title>
-  <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+
+  {% from "_icons.html" import icon %}
+
+  {# Inline SVG favicon: no extra request, and no 404 on every page load. #}
+  <link rel="icon" href="data:image/svg+xml,
+    %3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E
+    %3Crect width='32' height='32' rx='8' fill='%234f46e5'/%3E
+    %3Ccircle cx='16' cy='16' r='8' fill='none' stroke='white' stroke-width='2'/%3E
+    %3Ccircle cx='16' cy='16' r='2.5' fill='white'/%3E%3C/svg%3E">
+
+  {# IBM Plex Sans (UI) + IBM Plex Mono (operational data). Preconnect so the
+     faces resolve early; `display=swap` plus a matched system fallback stack in
+     style.css keeps the swap from moving layout. #}
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+  {# Applied before first paint so the chosen theme never flashes. #}
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("gb-theme");
+        if (t === "dark" || t === "light") document.documentElement.setAttribute("data-theme", t);
+      } catch (e) { /* storage blocked: fall back to prefers-color-scheme */ }
+    })();
+  </script>
+
+  {# The rarity/variant palette comes from utils/aesthetics.py so the panel and
+     the bot can never disagree about what a tier looks like. Emitted before
+     style.css so the sheet's rules can consume the variables. #}
+  <style>
+    :root {
+{{ palette_css }}
+    }
+  </style>
+
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+
+  {# Without JS the workbench tablist cannot switch panes, so drop back to every
+     album stacked -- the accordion-shaped fallback -- rather than stranding the
+     admin on album one. #}
+  <noscript>
+    <style>
+      .wb-albums { display: none; }
+      .workbench { grid-template-columns: 1fr; }
+      .wb-panel[hidden] { display: block !important; }
+      .wb-panel + .wb-panel { border-top: 1px solid var(--border); }
+      .wb-head { position: static; border-radius: 0; }
+    </style>
+  </noscript>
 </head>
 <body>
   {% if session.get('authed') %}
   <nav class="nav">
-    <div class="nav-brand">🎵 Grails-Bot Admin</div>
-    <a href="{{ url_for('dashboard.index') }}">Dashboard</a>
-    <a href="{{ url_for('catalog.artists') }}">Catalog</a>
-    <a href="{{ url_for('users.index') }}">Users</a>
-    <a href="{{ url_for('users.latest') }}">Latest Pulls</a>
-    <a href="{{ url_for('mythic.index') }}">Mythic Hunt</a>
-    <form method="post" action="{{ url_for('auth.logout') }}" class="nav-logout">
-      <button type="submit">Log out</button>
-    </form>
+    <a class="nav-brand" href="{{ url_for('dashboard.index') }}">
+      <span class="brand-mark">{{ icon("disc-3", size=18) }}</span>
+      <span>Grails-Bot</span>
+    </a>
+
+    <div class="nav-links" id="nav-links">
+      {% set nav_items = [
+        ('dashboard.index',  'Dashboard',    ['dashboard.index']),
+        ('catalog.artists',  'Catalog',      ['catalog.artists', 'catalog.artist_detail']),
+        ('users.index',      'Users',        ['users.index', 'users.detail']),
+        ('users.latest',     'Latest pulls', ['users.latest']),
+        ('mythic.index',     'Mythic hunt',  ['mythic.index', 'mythic.status']),
+        ('odds.index',       'Odds',         ['odds.index']),
+      ] %}
+      {% for endpoint, label, active_on in nav_items %}
+      <a class="nav-link" href="{{ url_for(endpoint) }}"
+         {% if request.endpoint in active_on %}aria-current="page"{% endif %}>{{ label }}</a>
+      {% endfor %}
+    </div>
+
+    <div class="nav-end">
+      <button type="button" class="btn btn-ghost btn-icon" data-theme-toggle
+              aria-label="Switch to light theme">
+        <span data-theme-icon="dark">{{ icon("moon", size=16) }}</span>
+        <span data-theme-icon="light" hidden>{{ icon("sun", size=16) }}</span>
+      </button>
+      <form method="post" action="{{ url_for('auth.logout') }}">
+        <button type="submit" class="btn btn-ghost btn-sm">{{ icon("log-out", size=15) }}Log out</button>
+      </form>
+      <button type="button" class="btn btn-ghost btn-icon nav-toggle" data-nav-toggle
+              aria-expanded="false" aria-controls="nav-links" aria-label="Show navigation">
+        {{ icon("menu", size=17) }}
+      </button>
+    </div>
   </nav>
   {% endif %}
 
-  <main class="container">
-    {% with messages = get_flashed_messages(with_categories=true) %}
-      {% if messages %}
-        <ul class="flashes">
-        {% for category, message in messages %}
-          <li class="flash flash-{{ category }}">{{ message }}</li>
-        {% endfor %}
-        </ul>
-      {% endif %}
-    {% endwith %}
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+    <ul class="flashes" role="status" aria-live="polite">
+      {% for category, message in messages %}
+      <li class="flash flash-{{ category }}">
+        <span class="flash-icon">
+          {%- if category == 'success' -%}{{ icon("check", size=16) }}
+          {%- elif category == 'error' -%}{{ icon("circle-alert", size=16) }}
+          {%- else -%}{{ icon("triangle-alert", size=16) }}{%- endif -%}
+        </span>
+        <span class="flash-text">{{ message }}</span>
+        <button type="button" class="flash-close" aria-label="Dismiss">{{ icon("x", size=15) }}</button>
+      </li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  {% endwith %}
 
+  {% block body %}
+  <main class="container">
     {% block content %}{% endblock %}
   </main>
+  {% endblock %}
+
+  {# Application-owned confirmation dialog. One host element; app.js fills it
+     from the data-* attributes of whichever form asked for confirmation. #}
+  <dialog class="confirm" id="confirm-dialog" aria-labelledby="confirm-title">
+    <form method="dialog" class="confirm-inner">
+      <h2 class="confirm-title" id="confirm-title"></h2>
+      <p class="confirm-body"></p>
+      <p class="confirm-error" role="alert" hidden></p>
+      <div class="confirm-actions">
+        <button type="button" class="btn btn-ghost" data-confirm-cancel>Cancel</button>
+        <button type="button" class="btn btn-danger" data-confirm-accept></button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="{{ url_for('static', filename='app.js') }}" defer></script>
 </body>
 </html>

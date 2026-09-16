@@ -13,19 +13,15 @@ from discord.ext import commands
 
 from db import (add_song_to_collection, get_user_song_by_details, remove_from_collection,
                 get_user_mythic_copy_number, get_user_tradeable_items, get_collection_item_by_id)
+from utils.command_types import slash_only
+from utils.aesthetics import VARIANTS, VARIANT_EMOJI, card_emoji
 
 log = logging.getLogger("grails.trade")
 
-RARITIES = ["mythic", "sig_vinyl", "vinyl", "sketch", "glitched", "default"]
-
-rarity_emojis = {
-    "mythic": "💎",
-    "sig_vinyl": "🖋️",
-    "vinyl": "💿",
-    "sketch": "✏️",
-    "glitched": "🧩",
-    "default": "⚪️"
-}
+# These are collection *variants*, not song rarities -- the local name is kept
+# so the rest of this cog reads unchanged.
+RARITIES = VARIANTS
+rarity_emojis = VARIANT_EMOJI
 
 
 def _find_trade_item(user_id, rarity, item_input, artist=None):
@@ -96,16 +92,23 @@ class TradeCog(commands.Cog):
         self.active_trades = {}  # Store active trade requests
 
     def format_song_display(self, user_id, song_data, rarity):
-        """Format song display with copy number for mythics"""
+        """Format song display with copy number for mythics.
+
+        `rarity` here is the *variant* -- the trade flow's long-standing naming.
+        The song's actual rarity rides along as the row's last column, so the
+        line can show the same card emoji the collection and view embeds use.
+        """
         song_name = song_data[3]
         artist_name = song_data[4]
         album_name = song_data[6]
+        song_rarity = song_data[7] if len(song_data) > 7 else None
+        glyph = card_emoji(song_rarity, rarity.lower())
 
         if rarity.lower() == "mythic":
             copy_number = get_user_mythic_copy_number(user_id, song_data[1])  # song_data[1] is song_id
             if copy_number:
-                return f"{rarity_emojis[rarity.lower()]} **#{copy_number} {song_name}** - **{artist_name}**\n*{album_name}*"
-        return f"{rarity_emojis[rarity.lower()]} **{song_name}** - **{artist_name}**\n*{album_name}*"
+                return f"{glyph} **#{copy_number} {song_name}** - **{artist_name}**\n*{album_name}*"
+        return f"{glyph} **{song_name}** - **{artist_name}**\n*{album_name}*"
 
     def _ambiguous_message(self, rarity, item, matches, artist=None):
         artist_note = f" by **{artist}**" if artist else ""
@@ -133,6 +136,7 @@ class TradeCog(commands.Cog):
         return song_found, matches, artist
 
     @commands.hybrid_command(name="trade", description="Offer a song to trade with another user")
+    @slash_only()
     @app_commands.describe(user="User to trade with", rarity="Rarity of the song you're offering",
                            artist="Filter to one artist first (handy if you have many songs)",
                            item="The song to offer (pick from autocomplete)")
@@ -203,6 +207,7 @@ class TradeCog(commands.Cog):
             await trade_msg.edit(embed=embed)
 
     @commands.hybrid_command(name="offer", description="Respond to a trade request with your offer")
+    @slash_only()
     @app_commands.describe(rarity="Rarity of the song you're offering",
                            artist="Filter to one artist first (handy if you have many songs)",
                            item="The song to offer (pick from autocomplete)")
@@ -321,6 +326,7 @@ class TradeCog(commands.Cog):
             del self.active_trades[trade_key]
 
     @commands.hybrid_command(name="canceltrade", description="Cancel any active trade requests")
+    @slash_only()
     async def canceltrade(self, ctx):
         """Cancel any active trade requests"""
         cancelled = False

@@ -1,34 +1,66 @@
 {% extends "base.html" %}
-{% block title %}Latest Pulls – Grails-Bot Admin{% endblock %}
+{% from "_icons.html" import icon %}
+{% from "_macros.html" import variant_badge, song_cell, empty_row %}
+{% block title %}Latest pulls – Grails-Bot Admin{% endblock %}
 {% block content %}
-<h1>Latest Pulls</h1>
 
-<form method="get" class="inline-form">
-  <input type="number" name="n" value="{{ n }}" min="1" max="200">
-  <button type="submit">Refresh</button>
-</form>
+<div class="page-head">
+  <h1>Latest pulls</h1>
 
-<table class="table">
-  <thead><tr><th>Song</th><th>Artist</th><th>Variant</th><th>Album</th><th>Collected At</th></tr></thead>
-  <tbody>
-    {% for id, song_name, artist, variant, album_name, collected_at in songs %}
-    <tr>
-      <td>{{ song_name }}</td>
-      <td>{{ artist }}</td>
-      <td>{{ variant }}</td>
-      <td>{{ album_name }}</td>
-      <td>{{ collected_at }}</td>
-    </tr>
-    {% else %}
-    <tr><td colspan="5" class="muted">No pulls yet.</td></tr>
-    {% endfor %}
-  </tbody>
-</table>
+  <form method="get" class="toolbar">
+    <label class="field-inline" for="n">Show
+      <input type="number" id="n" name="n" value="{{ n }}" min="1" max="200" class="input-num data">
+    </label>
+    <button type="submit" class="btn btn-ghost">Apply</button>
+  </form>
+</div>
 
-<h2>Undo Recent Pulls</h2>
-<form method="post" action="{{ url_for('users.remove_latest') }}"
-      onsubmit="return confirm('Remove the most recent pull(s) from the collection?');">
-  <input type="number" name="n" value="1" min="1" max="200">
-  <button type="submit" class="btn-danger">Remove most recent</button>
-</form>
+<div class="panel table-wrap">
+  <table class="table" data-sortable>
+    <thead>
+      <tr>
+        <th data-sort="text">Song</th>
+        <th data-sort="text">Variant</th>
+        <th data-sort="text">Album</th>
+        <th data-sort="text">Pulled by</th>
+        <th data-sort="text">Collected</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for id, song_name, artist, variant, album_name, collected_at, album_image, user_id, username in songs %}
+      <tr>
+        <td>{{ song_cell(album_image, song_name, artist) }}</td>
+        <td>{{ variant_badge(variant) }}</td>
+        <td class="cell-clip" title="{{ album_name or '' }}">{{ album_name or "—" }}</td>
+        <td class="nowrap">
+          {# username is NULL for a collector who was later unregistered; their
+             pulls stay in the table, so fall back to the raw Discord id. #}
+          <a href="{{ url_for('users.detail', user_id=user_id) }}"
+             {% if not username %}class="data"{% endif %}>{{ username or user_id }}</a>
+        </td>
+        <td class="data nowrap muted">{{ collected_at|moment }}</td>
+      </tr>
+      {% else %}
+      {{ empty_row(5, "headphones", "No pulls yet", "Songs appear here as players pull them.") }}
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<section class="section">
+  <div class="panel panel-danger danger-bar">
+    <p class="danger-copy">Deletes the most recent collection entries across all players. Use it with caution.</p>
+    <form method="post" action="{{ url_for('users.remove_latest') }}" class="danger-actions"
+          data-confirm
+          data-confirm-title="Remove the most recent pulls?"
+          data-confirm-body="The newest collection entries are deleted for every player, not just one. This cannot be undone."
+          data-confirm-verb="Remove pulls">
+      <label class="field-inline" for="remove-n">How many
+        <input type="number" id="remove-n" name="n" value="1" min="1" max="200" class="input-num data">
+      </label>
+      <button type="submit" class="btn btn-danger">{{ icon("trash-2", size=15) }}Remove most recent</button>
+    </form>
+  </div>
+</section>
+
 {% endblock %}

@@ -1,36 +1,87 @@
 {% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% from "_macros.html" import stat_card, variant_badge, song_cell, empty_row, album_art %}
 {% block title %}Dashboard – Grails-Bot Admin{% endblock %}
 {% block content %}
-<h1>Dashboard</h1>
 
-<div class="stat-row">
-  <div class="stat-card"><div class="stat-value">{{ song_count }}</div><div class="stat-label">Songs</div></div>
-  <div class="stat-card"><div class="stat-value">{{ album_count }}</div><div class="stat-label">Albums</div></div>
-  <div class="stat-card"><div class="stat-value">{{ user_count }}</div><div class="stat-label">Users</div></div>
+<div class="page-head">
+  <h1>Dashboard</h1>
 </div>
 
-<h2>Current Mythic Hunt</h2>
-{% if hunt %}
-  <p><strong>{{ hunt.song_name }}</strong> by <strong>{{ hunt.artist }}</strong> from <em>{{ hunt.album_name }}</em></p>
-{% else %}
-  <p class="muted">No hunt set. <a href="{{ url_for('mythic.index') }}">Set one</a>.</p>
-{% endif %}
+<div class="stat-row">
+  {{ stat_card(song_count,  "Songs",  "music-2",     url_for('catalog.artists')) }}
+  {{ stat_card(album_count, "Albums", "disc-3",      url_for('catalog.artists')) }}
+  {{ stat_card(user_count,  "Users",  "users-round", url_for('users.index')) }}
+</div>
 
-<h2>Latest Pulls</h2>
-<table class="table">
-  <thead><tr><th>Song</th><th>Artist</th><th>Variant</th><th>Album</th><th>Collected At</th></tr></thead>
-  <tbody>
-    {% for id, song_name, artist, variant, album_name, collected_at in latest %}
-    <tr>
-      <td>{{ song_name }}</td>
-      <td>{{ artist }}</td>
-      <td>{{ variant }}</td>
-      <td>{{ album_name }}</td>
-      <td>{{ collected_at }}</td>
-    </tr>
-    {% else %}
-    <tr><td colspan="5" class="muted">No pulls yet.</td></tr>
-    {% endfor %}
-  </tbody>
-</table>
+<section class="section">
+  <div class="section-head"><h2>Current mythic hunt</h2></div>
+
+  {% if hunt %}
+  <div class="hunt-card">
+    {{ album_art(hunt.album_url, hunt.album_name, "art-lg") }}
+
+    <div class="hunt-body">
+      <span class="badge badge-variant-mythic"><span class="dot" aria-hidden="true"></span>Active target</span>
+      <p class="hunt-song">{{ hunt.song_name }}</p>
+      <p class="hunt-meta">
+        {{ hunt.artist }}{% if hunt.album_name %} <span class="sep">·</span> {{ hunt.album_name }}{% endif %}
+      </p>
+    </div>
+
+    <div class="hunt-actions">
+      <a class="btn btn-ghost btn-sm" href="{{ url_for('mythic.status', song_id=hunt.song_id) }}">
+        {{ icon("copy", size=15) }}Copy status
+      </a>
+      <a class="btn btn-ghost btn-sm" href="{{ url_for('mythic.index') }}">
+        {{ icon("crosshair", size=15) }}Change target
+      </a>
+    </div>
+  </div>
+  {% else %}
+  <div class="panel">
+    <div class="empty empty-compact">
+      <span class="empty-icon">{{ icon("gem", size=22) }}</span>
+      <p class="empty-title">No hunt set</p>
+      <p class="empty-hint">The next mythic pull will award a random eligible song.</p>
+      <div class="empty-actions">
+        <a class="btn btn-sm" href="{{ url_for('mythic.index') }}">Set a target</a>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+</section>
+
+<section class="section">
+  <div class="section-head">
+    <h2>Latest pulls</h2>
+    <a class="btn btn-ghost btn-sm" href="{{ url_for('users.latest') }}">View all</a>
+  </div>
+
+  <div class="panel table-wrap">
+    <table class="table">
+      <thead>
+        <tr><th>Song</th><th>Variant</th><th>Album</th><th>Pulled by</th><th>Collected</th></tr>
+      </thead>
+      <tbody>
+        {% for id, song_name, artist, variant, album_name, collected_at, album_image, user_id, username in latest %}
+        <tr>
+          <td>{{ song_cell(album_image, song_name, artist) }}</td>
+          <td>{{ variant_badge(variant) }}</td>
+          <td class="cell-clip">{{ album_name or "—" }}</td>
+          <td class="nowrap">
+            <a href="{{ url_for('users.detail', user_id=user_id) }}"
+               {% if not username %}class="data"{% endif %}>{{ username or user_id }}</a>
+          </td>
+          <td class="data nowrap muted">{{ collected_at|moment }}</td>
+        </tr>
+        {% else %}
+        {{ empty_row(5, "headphones", "No pulls yet",
+                     "Songs appear here as players pull them. Set a mythic hunt to steer what drops next.") }}
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
 {% endblock %}

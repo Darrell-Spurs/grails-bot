@@ -4,6 +4,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 import discord
 from discord.ext import commands
 from db import get_song_rarity_counts_by_artist, get_songs_by_artist_and_rarity, get_all_artists
+from utils import aesthetics
 
 # ✅ Interactive View for song list with pagination
 class SongListView(discord.ui.View):
@@ -106,6 +107,7 @@ class RarityCog(commands.Cog):
         self.bot = bot
 
     @commands.command(aliases=['r'])
+    @commands.has_role("grails-admin")
     async def rarity(self, ctx, *, artist_name: str = None):
         """
         Show rarity distribution for an artist.
@@ -154,8 +156,8 @@ class RarityCog(commands.Cog):
         for rarity, count in rarity_counts:
             percentage = (count / total_songs) * 100
             rarity_emoji = self._get_rarity_emoji(rarity)
-            if rarity.title() == "Common":
-                rarity_text.append(f"{rarity_emoji} **N/A**: {count} songs ({percentage:.1f}%)")
+            if not aesthetics.is_rarity(rarity):
+                rarity_text.append(f"{rarity_emoji} **Unassigned**: {count} songs ({percentage:.1f}%)")
             else:
                 rarity_text.append(f"{rarity_emoji} **{rarity.title()}**: {count} songs ({percentage:.1f}%)")
         
@@ -169,6 +171,7 @@ class RarityCog(commands.Cog):
         await ctx.send(embed=embed)
 
     @commands.command(aliases=['sr'])
+    @commands.has_role("grails-admin")
     async def showrarity(self, ctx, *, args: str = None):
         """
         Show all songs of a specific rarity for an artist.
@@ -196,10 +199,13 @@ class RarityCog(commands.Cog):
         artist_name = " ".join(args_parts[:-1])  # Everything else is artist name
         
         # Validate rarity
-        valid_rarities = ["ultimate", "legendary", "elite", "unique", "basic", "ul", "l", "e", "u", "b", "common"]
+        # "unassigned" is listed so an admin can review what still needs a tier;
+        # the single letters are the long-standing shorthands.
+        valid_rarities = aesthetics.RARITY_ORDER + [aesthetics.UNASSIGNED,
+                                                    "ul", "l", "e", "u", "b"]
         if rarity.lower() not in valid_rarities:
             await ctx.send(f"❌ **Invalid rarity!**\n"
-                          f"Valid rarities: {', '.join([f'`{r}`' for r in valid_rarities[:4]])}")
+                          f"Valid rarities: {', '.join(f'`{r}`' for r in aesthetics.RARITY_ORDER)}")
             return
         
         if len(rarity) <= 2:
@@ -266,32 +272,15 @@ class RarityCog(commands.Cog):
         await ctx.send(embed=embed, view=view)
 
     def _get_rarity_emoji(self, rarity):
-        """Get emoji for each rarity"""
-        emojis = {
-            "ultimate": "🪐",
-            "legendary": "🏆",
-            "elite": "⭐",
-            "unique": "🔮",
-            "basic": "📄",
-            "common": "❓"
-        }
-        return emojis.get(rarity, "🎵")
+        return aesthetics.rarity_emoji(rarity)
 
     def _get_rarity_color(self, rarity):
-        """Get Discord color for each rarity"""
-        colors = {
-            "ultimate": discord.Color.gold(),
-            "legendary": discord.Color.orange(),
-            "elite": discord.Color.red(),
-            "unique": discord.Color.purple(),
-            "basic": discord.Color.blue(),
-        }
-        return colors.get(rarity, discord.Color.blue())
+        return discord.Color(aesthetics.rarity_colour_int(rarity))
 
     @rarity.error
     async def rarity_error(self, ctx, error):
         if isinstance(error, commands.MissingRole):
-            await ctx.send("❌ You need the 'bot_admin' role to use this command!")
+            await ctx.send("❌ You need the 'grails-admin' role to use this command!")
         elif isinstance(error, commands.MissingRequiredArgument):
             await ctx.send("❌ **Missing artist name!**\n"
                           "**Usage:** `.rarity <artist_name>`\n"
@@ -302,7 +291,7 @@ class RarityCog(commands.Cog):
     @showrarity.error
     async def showrarity_error(self, ctx, error):
         if isinstance(error, commands.MissingRole):
-            await ctx.send("❌ You need the 'bot_admin' role to use this command!")
+            await ctx.send("❌ You need the 'grails-admin' role to use this command!")
         elif isinstance(error, commands.MissingRequiredArgument):
             await ctx.send("❌ **Missing arguments!**\n"
                           "**Usage:** `.showrarity <artist_name> <rarity>`\n"

@@ -36,7 +36,7 @@ class ListCog(commands.Cog):
             assign_cog.set_active_list(ctx.channel.id, active_list)
 
     @commands.command()
-    @commands.has_role("bot_admin")
+    @commands.has_role("grails-admin")
     async def list(self, ctx, *, args: str = None):
         """
         List songs by artist and album category.
@@ -263,7 +263,7 @@ class ListCog(commands.Cog):
     async def list_error(self, ctx, error):
         if isinstance(error, commands.MissingRole):
             await ctx.send(
-                "❌ You need the 'bot_admin' role to use this command!")
+                "❌ You need the 'grails-admin' role to use this command!")
         elif isinstance(error, commands.MissingRequiredArgument):
             await ctx.send(
                 "❌ **Missing arguments!**\n"

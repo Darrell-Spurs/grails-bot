@@ -1,53 +1,119 @@
 {% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% from "_macros.html" import stat_card, rarity_badge, variant_badge, song_cell, empty_row %}
 {% block title %}{{ user.username or user.id }} – Grails-Bot Admin{% endblock %}
 {% block content %}
-<p><a href="{{ url_for('users.index') }}">&laquo; All users</a></p>
-<h1>{{ user.username or user.id }}</h1>
-<p class="muted">ID: {{ user.id }}</p>
+
+<a class="backlink" href="{{ url_for('users.index') }}">{{ icon("chevron-left", size=15) }}All users</a>
+
+<div class="page-head">
+  <div class="title-block">
+    <h1>{{ user.username or "Unnamed collector" }}</h1>
+    <p class="title-meta data">ID {{ user.id }}</p>
+  </div>
+</div>
 
 <div class="stat-row">
-  <div class="stat-card"><div class="stat-value">{{ user.xp }}</div><div class="stat-label">XP</div></div>
-  <div class="stat-card"><div class="stat-value">{{ user.vinyl_count }}</div><div class="stat-label">Vinyl</div></div>
-  <div class="stat-card"><div class="stat-value">{{ user.sig_vinyl_count }}</div><div class="stat-label">Sig. Vinyl</div></div>
+  {{ stat_card(user.xp,              "XP",         "zap") }}
+  {{ stat_card(user.vinyl_count,     "Vinyl",      "disc-3") }}
+  {{ stat_card(user.sig_vinyl_count, "Sig. vinyl", "pen-line") }}
+  {{ stat_card(collection|length,    "Songs owned", "music-2") }}
 </div>
 
-<div class="form-row">
-  <form method="post" action="{{ url_for('users.adjust_xp', user_id=user.id) }}" class="inline-form">
-    <input type="number" name="delta" placeholder="+/- XP" required>
-    <button type="submit">Apply XP</button>
-  </form>
-  <form method="post" action="{{ url_for('users.adjust_vinyl', user_id=user.id) }}" class="inline-form">
-    <input type="number" name="delta" placeholder="+/- Vinyl" required>
-    <button type="submit">Apply Vinyl</button>
-  </form>
-  <form method="post" action="{{ url_for('users.adjust_sig_vinyl', user_id=user.id) }}" class="inline-form">
-    <input type="number" name="delta" placeholder="+/- Sig. Vinyl" required>
-    <button type="submit">Apply Sig. Vinyl</button>
-  </form>
-</div>
+<section class="panel">
+  <div class="panel-head"><h2 class="panel-title">Adjust balances</h2></div>
+  <div class="panel-pad">
+    <div class="form-grid">
+      <form method="post" action="{{ url_for('users.adjust_xp', user_id=user.id) }}" class="field">
+        <label for="delta-xp">XP</label>
+        <div class="form-inline">
+          <input type="number" id="delta-xp" name="delta" placeholder="-250" required class="data">
+          <button type="submit" class="btn">Apply</button>
+        </div>
+      </form>
 
-<h2>Collection ({{ collection|length }})</h2>
-<table class="table">
-  <thead><tr><th>Song</th><th>Artist</th><th>Variant</th><th>Album</th><th>Copy #</th></tr></thead>
-  <tbody>
-    {% for song_name, artist, variant, album_name, image, copy_number in collection %}
-    <tr>
-      <td>{{ song_name }}</td>
-      <td>{{ artist }}</td>
-      <td>{{ variant }}</td>
-      <td>{{ album_name }}</td>
-      <td>{{ copy_number }}</td>
-    </tr>
-    {% else %}
-    <tr><td colspan="5" class="muted">No songs collected yet.</td></tr>
-    {% endfor %}
-  </tbody>
-</table>
+      <form method="post" action="{{ url_for('users.adjust_vinyl', user_id=user.id) }}" class="field">
+        <label for="delta-vinyl">Vinyl pulls</label>
+        <div class="form-inline">
+          <input type="number" id="delta-vinyl" name="delta" placeholder="3"
+                 min="-10000" max="10000" required class="data">
+          <button type="submit" class="btn">Apply</button>
+        </div>
+      </form>
 
-<h2>Danger Zone</h2>
-<form method="post" action="{{ url_for('users.unregister', user_id=user.id) }}"
-      onsubmit="return confirm('Unregister {{ user.username or user.id }}? This removes them from the users table.');">
-  <input type="hidden" name="confirm" value="yes">
-  <button type="submit" class="btn-danger">Unregister user</button>
-</form>
+      <form method="post" action="{{ url_for('users.adjust_sig_vinyl', user_id=user.id) }}" class="field">
+        <label for="delta-sig">Signature vinyl pulls</label>
+        <div class="form-inline">
+          <input type="number" id="delta-sig" name="delta" placeholder="1"
+                 min="-10000" max="10000" required class="data">
+          <button type="submit" class="btn">Apply</button>
+        </div>
+      </form>
+    </div>
+    <p class="hint">Positive adds, negative removes.</p>
+  </div>
+</section>
+
+<section class="section">
+  <div class="section-head">
+    <h2>Collection</h2>
+    {% if collection %}
+    <div class="search search-sm">
+      <span class="search-icon">{{ icon("search", size=15) }}</span>
+      <label class="visually-hidden" for="collection-filter">Filter collection</label>
+      <input type="search" id="collection-filter" placeholder="Filter collection"
+             data-search-focus data-search-clear
+             data-filter="#collection-table" data-filter-count="#collection-count">
+      <button type="button" class="search-clear btn-bare" data-search-clear-btn
+              aria-label="Clear filter" hidden>{{ icon("x", size=14) }}</button>
+    </div>
+    {% endif %}
+    <span class="count-note data"><span id="collection-count">{{ collection|length }}</span> shown</span>
+  </div>
+
+  <div class="panel table-wrap">
+    <table class="table" id="collection-table" data-sortable>
+      <thead>
+        <tr>
+          <th data-sort="text">Song</th>
+          <th data-sort="text">Rarity</th>
+          <th data-sort="text">Variant</th>
+          <th data-sort="text">Album</th>
+          <th class="num" data-sort="number">Copy</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for song_name, artist, variant, album_name, image, copy_number, rarity, collection_id in collection %}
+        <tr>
+          <td>{{ song_cell(image, song_name, artist) }}</td>
+          <td>{{ rarity_badge(rarity) }}</td>
+          <td>{{ variant_badge(variant) }}</td>
+          <td class="cell-clip">{{ album_name or "—" }}</td>
+          {# Copy numbers only mean anything for mythics; everything else is a plain dupe. #}
+          <td class="num data">
+            {%- if variant == "mythic" -%}<strong>#{{ copy_number }}</strong>{%- else -%}<span class="muted">—</span>{%- endif -%}
+          </td>
+        </tr>
+        {% else %}
+        {{ empty_row(5, "music-2", "Nothing collected yet", "This player has not pulled any songs.") }}
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="section">
+  <div class="panel panel-danger danger-bar">
+    <p class="danger-copy">Removes this player from the users table, clearing their XP and pull balances.</p>
+    <form method="post" action="{{ url_for('users.unregister', user_id=user.id) }}" class="danger-actions"
+          data-confirm
+          data-confirm-title="Unregister {{ user.username or user.id }}?"
+          data-confirm-body="Their XP and pull balances are cleared. Collected songs stay in the database, and the player re-registers automatically on their next bot command."
+          data-confirm-verb="Unregister user">
+      <input type="hidden" name="confirm" value="yes">
+      <button type="submit" class="btn btn-danger">{{ icon("trash-2", size=15) }}Unregister user</button>
+    </form>
+  </div>
+</section>
+
 {% endblock %}

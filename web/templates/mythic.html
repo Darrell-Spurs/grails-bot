@@ -1,55 +1,108 @@
 {% extends "base.html" %}
-{% block title %}Mythic Hunt – Grails-Bot Admin{% endblock %}
+{% from "_icons.html" import icon %}
+{% from "_macros.html" import rarity_badge, song_cell, album_art, empty_row, empty_state %}
+{% block title %}Mythic hunt – Grails-Bot Admin{% endblock %}
 {% block content %}
-<h1>Mythic Hunt</h1>
 
-<h2>Current Target</h2>
-{% if hunt %}
-<p><strong>{{ hunt.song_name }}</strong> by <strong>{{ hunt.artist }}</strong> from <em>{{ hunt.album_name }}</em></p>
-<p><a href="{{ url_for('mythic.status', song_id=hunt.song_id) }}">View copy status</a></p>
-<form method="post" action="{{ url_for('mythic.clear_hunt') }}">
-  <button type="submit" class="btn-danger">Clear hunt</button>
-</form>
-{% else %}
-<p class="muted">No hunt currently set. The next mythic pull will be random.</p>
-{% endif %}
+<div class="page-head">
+  <h1>Mythic hunt</h1>
+</div>
 
-<h2>Set a New Target</h2>
-<form method="get" class="inline-form">
-  <input type="text" name="q" placeholder="Search song or artist..." value="{{ q }}">
-  <button type="submit">Search</button>
-</form>
+<section class="section section-tight">
+  <div class="section-head"><h2>Current target</h2></div>
 
-{% if q %}
-<table class="table">
-  <thead><tr><th>Song</th><th>Artist</th><th>Album</th><th>Rarity</th><th></th></tr></thead>
-  <tbody>
-    {% for song_id, song_name, artist, rarity, album_id, album_name, album_url in results %}
-    <tr>
-      <td>{{ song_name }}</td>
-      <td>{{ artist }}</td>
-      <td>{{ album_name or '—' }}</td>
-      <td>{{ rarity }}</td>
-      <td>
-        {% if album_id %}
-        <form method="post" action="{{ url_for('mythic.set_hunt') }}">
-          <input type="hidden" name="song_id" value="{{ song_id }}">
-          <input type="hidden" name="song_name" value="{{ song_name }}">
-          <input type="hidden" name="artist" value="{{ artist }}">
-          <input type="hidden" name="album_id" value="{{ album_id }}">
-          <input type="hidden" name="album_name" value="{{ album_name }}">
-          <input type="hidden" name="album_url" value="{{ album_url }}">
-          <button type="submit">Set as hunt</button>
-        </form>
+  {% if hunt %}
+  <div class="hunt-card">
+    {{ album_art(hunt.album_url, hunt.album_name, "art-lg") }}
+
+    <div class="hunt-body">
+      <span class="badge badge-variant-mythic"><span class="dot" aria-hidden="true"></span>Active target</span>
+      <p class="hunt-song">{{ hunt.song_name }}</p>
+      <p class="hunt-meta">
+        {{ hunt.artist }}{% if hunt.album_name %} <span class="sep">·</span> {{ hunt.album_name }}{% endif %}
+      </p>
+    </div>
+
+    <div class="hunt-actions">
+      <a class="btn btn-ghost btn-sm" href="{{ url_for('mythic.status', song_id=hunt.song_id) }}">
+        {{ icon("copy", size=15) }}Copy status
+      </a>
+      <form method="post" action="{{ url_for('mythic.clear_hunt') }}"
+            data-confirm
+            data-confirm-title="Clear the mythic hunt?"
+            data-confirm-body="With no target set, the next mythic pull awards a random eligible song. You can set a new target at any time."
+            data-confirm-verb="Clear hunt">
+        <button type="submit" class="btn btn-danger btn-sm">Clear hunt</button>
+      </form>
+    </div>
+  </div>
+  {% else %}
+  <div class="panel">
+    {{ empty_state("gem", "No target set",
+                   "The next mythic pull will award a random eligible song. Search below to choose one.",
+                   compact=True) }}
+  </div>
+  {% endif %}
+</section>
+
+<section class="section">
+  <div class="section-head"><h2>{{ "Change target" if hunt else "Set a target" }}</h2></div>
+
+  <form method="get" class="toolbar toolbar-block" role="search">
+    <label class="visually-hidden" for="song-search">Search songs</label>
+    <div class="search">
+      <span class="search-icon">{{ icon("search", size=15) }}</span>
+      <input type="search" id="song-search" name="q" value="{{ q }}"
+             placeholder="Search song or artist" title="Press / to focus"
+             data-search-focus data-search-clear>
+      <button type="button" class="search-clear btn-bare" data-search-clear-btn
+              aria-label="Clear search" {% if not q %}hidden{% endif %}>{{ icon("x", size=14) }}</button>
+    </div>
+    <button type="submit" class="btn">Search</button>
+    <p class="toolbar-hint">Only songs with a linked album can be set — the card art comes from the album.</p>
+  </form>
+
+  {% if q %}
+  <div class="panel table-wrap">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Song</th><th>Album</th><th>Rarity</th>
+          <th class="col-action"><span class="visually-hidden">Action</span></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for song_id, song_name, artist, rarity, album_id, album_name, album_image in results %}
+        <tr>
+          <td>{{ song_cell(album_image, song_name, artist) }}</td>
+          <td class="cell-clip" title="{{ album_name or '' }}">{{ album_name or "—" }}</td>
+          <td>{{ rarity_badge(rarity) }}</td>
+          <td class="col-action">
+            {% if not album_id %}
+              <span class="muted note-sm">No album linked</span>
+            {% elif hunt and hunt.song_id == song_id %}
+              <span class="badge badge-variant-mythic"><span class="dot" aria-hidden="true"></span>Current</span>
+            {% else %}
+              <form method="post" action="{{ url_for('mythic.set_hunt') }}">
+                <input type="hidden" name="song_id" value="{{ song_id }}">
+                <input type="hidden" name="song_name" value="{{ song_name }}">
+                <input type="hidden" name="artist" value="{{ artist }}">
+                <input type="hidden" name="album_id" value="{{ album_id }}">
+                <input type="hidden" name="album_name" value="{{ album_name }}">
+                <input type="hidden" name="album_url" value="{{ album_image }}">
+                <button type="submit" class="btn btn-ghost btn-sm">Set as target</button>
+              </form>
+            {% endif %}
+          </td>
+        </tr>
         {% else %}
-        <span class="muted">No album linked</span>
-        {% endif %}
-      </td>
-    </tr>
-    {% else %}
-    <tr><td colspan="5" class="muted">No matches.</td></tr>
-    {% endfor %}
-  </tbody>
-</table>
-{% endif %}
+        {{ empty_row(4, "search", "No matches for “" ~ q ~ "”",
+                     "Search matches song titles and artist names.") }}
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</section>
+
 {% endblock %}

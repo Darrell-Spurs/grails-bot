@@ -1,27 +1,64 @@
 {% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% from "_macros.html" import empty_row %}
 {% block title %}Users – Grails-Bot Admin{% endblock %}
 {% block content %}
-<h1>Users</h1>
 
-<form method="get" class="inline-form">
-  <input type="text" name="q" placeholder="Search by id or username..." value="{{ q }}">
-  <button type="submit">Search</button>
-</form>
+<div class="page-head">
+  <h1>Users</h1>
 
-<table class="table">
-  <thead><tr><th>ID</th><th>Username</th><th>XP</th><th>Vinyl</th><th>Sig. Vinyl</th></tr></thead>
-  <tbody>
-    {% for id, username, xp, vinyl_count, sig_vinyl_count in users %}
-    <tr>
-      <td><a href="{{ url_for('users.detail', user_id=id) }}">{{ id }}</a></td>
-      <td>{{ username or '—' }}</td>
-      <td>{{ xp }}</td>
-      <td>{{ vinyl_count }}</td>
-      <td>{{ sig_vinyl_count }}</td>
-    </tr>
-    {% else %}
-    <tr><td colspan="5" class="muted">No users found.</td></tr>
-    {% endfor %}
-  </tbody>
-</table>
+  <form method="get" class="toolbar" role="search">
+    <label class="visually-hidden" for="user-search">Search users</label>
+    <div class="search">
+      <span class="search-icon">{{ icon("search", size=15) }}</span>
+      <input type="search" id="user-search" name="q" value="{{ q }}"
+             placeholder="Search id or username" title="Press / to focus"
+             data-search-focus data-search-clear
+             data-filter="#users-table" data-filter-count="#user-count">
+      <button type="button" class="search-clear btn-bare" data-search-clear-btn
+              aria-label="Clear search" {% if not q %}hidden{% endif %}>{{ icon("x", size=14) }}</button>
+    </div>
+    <button type="submit" class="btn btn-ghost">Search</button>
+  </form>
+</div>
+
+<div class="section-head">
+  <h2 class="visually-hidden">All users</h2>
+  <span class="count-note data"><span id="user-count">{{ users|length }}</span> shown</span>
+</div>
+
+<div class="panel table-wrap">
+  <table class="table" id="users-table" data-sortable>
+    <thead>
+      <tr>
+        {# Sortable so the XP ranking can be restored after sorting elsewhere. #}
+        <th class="num col-rank" data-sort="number">Rank</th>
+        <th data-sort="text">Username</th>
+        <th data-sort="text">ID</th>
+        <th class="num" data-sort="number">XP</th>
+        <th class="num" data-sort="number">Vinyl</th>
+        <th class="num" data-sort="number">Sig. vinyl</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for id, username, xp, vinyl_count, sig_vinyl_count in users %}
+      <tr>
+        <td class="num data muted">{{ loop.index }}</td>
+        <td><a href="{{ url_for('users.detail', user_id=id) }}">{{ username or "—" }}</a></td>
+        <td class="data muted">{{ id }}</td>
+        <td class="num data"><strong>{{ xp }}</strong></td>
+        <td class="num data">{{ vinyl_count }}</td>
+        <td class="num data">{{ sig_vinyl_count }}</td>
+      </tr>
+      {% else %}
+      {% if q %}
+        {{ empty_row(6, "search", "No users match “" ~ q ~ "”", "Search matches Discord id or username.") }}
+      {% else %}
+        {{ empty_row(6, "users-round", "No users registered", "Players register automatically on their first bot command.") }}
+      {% endif %}
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
 {% endblock %}

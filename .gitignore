@@ -193,3 +193,6 @@ desktop.ini
 scratch/
 scratchpad/
 *.local.py
+
+# Runtime logs (rotated by utils/logsetup.py)
+logs/

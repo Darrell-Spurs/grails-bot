@@ -22,11 +22,12 @@ load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 
 import db  # noqa: E402
 
-# (table, columns) in dependency order -- songs/albums before the link table.
+# (table, columns, primary key) in dependency order -- songs/albums before the
+# link table. The key column is what the post-copy verification diffs on.
 CATALOG = [
-    ("songs", ["id", "name", "artist", "rarity"]),
-    ("albums", ["id", "name", "artist", "artist_id", "image"]),
-    ("song_album", ["song_id", "spotify_song_id", "album_name", "album_id"]),
+    ("songs", ["id", "name", "artist", "rarity"], "id"),
+    ("albums", ["id", "name", "artist", "artist_id", "image"], "id"),
+    ("song_album", ["song_id", "spotify_song_id", "album_name", "album_id"], "spotify_song_id"),
 ]
 
 BATCH = 500
@@ -56,7 +57,7 @@ def main():
     db.init_db()
 
     total = 0
-    for table, cols in CATALOG:
+    for table, cols, _key in CATALOG:
         rows = src.execute(f"SELECT {', '.join(cols)} FROM {table}").fetchall()
         print(f"{table}: {len(rows)} rows", end="")
 
@@ -81,13 +82,45 @@ def main():
         finally:
             conn.close()
 
-    src.close()
-
     if args.dry_run:
+        src.close()
         print("\nDry run complete. Re-run without --dry-run to copy.")
         return 0
 
-    print(f"\nCopied {total} catalog rows.")
+    # INSERT OR IGNORE / ON CONFLICT DO NOTHING drops rows silently, so the copy
+    # loop's own count proves nothing. Diff the two databases key by key.
+    print("\nVerifying target against source...")
+    mismatches = 0
+    for table, _cols, key in CATALOG:
+        src_keys = {r[0] for r in src.execute(f"SELECT {key} FROM {table}")}
+        conn = db.get_connection()
+        try:
+            c = conn.cursor()
+            c.execute(f"SELECT {key} FROM {table}")
+            dst_keys = {r[0] for r in c.fetchall()}
+        finally:
+            conn.close()
+
+        missing = src_keys - dst_keys
+        extra = dst_keys - src_keys
+        status = "OK" if not missing and not extra else "MISMATCH"
+        print(f"  {table:12} source={len(src_keys):6}  target={len(dst_keys):6}  [{status}]")
+        for label, bad in (("in source but not in target", missing),
+                           ("in target but not in source", extra)):
+            if bad:
+                mismatches += 1
+                print(f"    {len(bad)} row(s) {label}, e.g.:")
+                for k in sorted(bad)[:10]:
+                    print(f"      {key}={k}")
+
+    src.close()
+
+    if mismatches:
+        print("\nMigration INCOMPLETE - see the mismatches above.")
+        print("The script is safe to re-run once the cause is fixed.")
+        return 1
+
+    print(f"\nCopied {total} catalog rows; source and target match exactly.")
     print("Player tables (users, collections, mythic_state) were left empty by design.")
     print("Verify with: python scripts/verify_db.py")
     return 0

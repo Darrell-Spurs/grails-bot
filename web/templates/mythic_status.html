@@ -1,24 +1,69 @@
 {% extends "base.html" %}
-{% block title %}Mythic Status – Grails-Bot Admin{% endblock %}
+{% from "_icons.html" import icon %}
+{% from "_macros.html" import stat_card, album_art, empty_row %}
+{% block title %}{{ (song.song_name ~ " – mythic status") if song else "Mythic status" }} – Grails-Bot Admin{% endblock %}
 {% block content %}
-<p><a href="{{ url_for('mythic.index') }}">&laquo; Mythic hunt</a></p>
-<h1>Mythic Status: {{ song_id }}</h1>
 
-<div class="stat-row">
-  <div class="stat-card"><div class="stat-value">{{ info.current_copies }}/{{ info.max_copies }}</div><div class="stat-label">Copies Claimed</div></div>
-  <div class="stat-card"><div class="stat-value">{{ info.remaining_copies }}</div><div class="stat-label">Remaining</div></div>
-  <div class="stat-card"><div class="stat-value">{{ 'Yes' if info.can_collect else 'No' }}</div><div class="stat-label">Can Collect</div></div>
+<a class="backlink" href="{{ url_for('mythic.index') }}">{{ icon("chevron-left", size=15) }}Mythic hunt</a>
+
+<div class="page-head">
+  <div class="title-block">
+    <h1>{{ song.song_name if song else "Mythic status" }}</h1>
+    <p class="title-meta">
+      {% if song %}{{ song.artist }} <span class="sep">·</span> {% endif %}<span class="data">{{ song_id }}</span>
+    </p>
+  </div>
 </div>
 
-<h2>Owners</h2>
-<table class="table">
-  <thead><tr><th>User ID</th><th>Collected At</th></tr></thead>
-  <tbody>
-    {% for user_id, collected_at in owners %}
-    <tr><td><a href="{{ url_for('users.detail', user_id=user_id) }}">{{ user_id }}</a></td><td>{{ collected_at }}</td></tr>
-    {% else %}
-    <tr><td colspan="2" class="muted">No owners yet.</td></tr>
-    {% endfor %}
-  </tbody>
-</table>
+<div class="hunt-card">
+  {{ album_art(song.album_url if song else None, song.album_name if song else "", "art-lg") }}
+  <div class="hunt-body">
+    <span class="badge badge-variant-mythic"><span class="dot" aria-hidden="true"></span>
+      {{ info.current_copies }} of {{ info.max_copies }} claimed
+    </span>
+    <div class="meter" role="img"
+         aria-label="{{ info.current_copies }} of {{ info.max_copies }} mythic copies claimed">
+      <span style="width: {{ (info.current_copies / info.max_copies * 100)|round(1) }}%"></span>
+    </div>
+    <p class="hunt-meta">
+      {% if info.can_collect %}
+        {{ info.remaining_copies }} {{ "copy" if info.remaining_copies == 1 else "copies" }} left.
+        The next claim will be <strong>#{{ info.next_copy_number }}</strong>.
+      {% else %}
+        All copies claimed. This song can no longer be pulled as a mythic.
+      {% endif %}
+    </p>
+  </div>
+</div>
+
+<div class="stat-row stat-row-tight">
+  {{ stat_card(info.current_copies|string ~ " / " ~ info.max_copies|string, "Copies claimed", "gem") }}
+  {{ stat_card(info.remaining_copies, "Remaining", "package") }}
+  {{ stat_card("Yes" if info.can_collect else "No", "Can collect", "target") }}
+</div>
+
+<section class="section">
+  <div class="section-head"><h2>Owners</h2></div>
+  <div class="panel table-wrap">
+    <table class="table">
+      <thead>
+        <tr><th class="num col-rank">Copy</th><th>User</th><th>Collected</th></tr>
+      </thead>
+      <tbody>
+        {% for user_id, collected_at in owners %}
+        <tr>
+          {# Owners come back ordered by collected_at ascending, which is exactly
+             the order copy numbers are handed out in. #}
+          <td class="num data"><strong>#{{ loop.index }}</strong></td>
+          <td><a class="data" href="{{ url_for('users.detail', user_id=user_id) }}">{{ user_id }}</a></td>
+          <td class="data nowrap muted">{{ collected_at|moment }}</td>
+        </tr>
+        {% else %}
+        {{ empty_row(3, "gem", "No owners yet", "Nobody has claimed a copy of this mythic.") }}
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
 {% endblock %}

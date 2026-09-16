@@ -42,4 +42,13 @@ def clear_hunt():
 def status(song_id):
     info = db.get_mythic_copy_info(song_id)
     owners = db.get_mythic_owners(song_id)
-    return render_template("mythic_status.html", song_id=song_id, info=info, owners=owners)
+
+    # The page is reached from the hunt, so the hunt usually names this very
+    # song -- pass it through so the header can read as a title rather than a
+    # bare Spotify id.
+    hunt = db.get_mythic_hunt()
+    song = hunt if hunt and hunt["song_id"] == song_id else None
+
+    return render_template(
+        "mythic_status.html", song_id=song_id, info=info, owners=owners, song=song
+    )

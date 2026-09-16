@@ -1,0 +1,172 @@
+{# ===========================================================================
+   Shared presentational macros.
+
+   Rarity and collection-variant colours match the bot's own (cogs/rarity_cog.py
+   and cogs/trade_cog.py) so an admin reads the same meaning here and in Discord.
+   Colour is never the only signal: every badge carries its name as text.
+   =========================================================================== #}
+
+{% from "_icons.html" import icon %}
+
+{# RARITY_ORDER, VARIANT_LABEL and the palette are injected by the app's
+   context processor, straight from utils/aesthetics.py. #}
+
+{% macro rarity_badge(rarity) %}
+  {#- Anything not one of the five tiers renders as "unassigned": a song that
+      has been imported but not yet given a rarity, and the honest answer for a
+      value the palette does not recognise. -#}
+  {%- set r = (rarity or UNASSIGNED)|lower -%}
+  <span class="badge badge-rarity-{{ r if r in RARITY_ORDER else UNASSIGNED }}">
+    <span class="dot" aria-hidden="true"></span>{{ r }}
+  </span>
+{%- endmacro %}
+
+
+{% macro variant_badge(variant) %}
+  {%- set v = (variant or "default")|lower -%}
+  <span class="badge badge-variant-{{ v if v in VARIANT_LABEL else 'default' }}">
+    <span class="dot" aria-hidden="true"></span>{{ VARIANT_LABEL.get(v, v) }}
+  </span>
+{%- endmacro %}
+
+
+{# Album art with a reserved box, so loading artwork never shifts the layout.
+   `size` is a modifier class: "" | "art-md" | "art-lg". #}
+{% macro album_art(image, alt, size="") %}
+  <span class="art {{ size }}">
+    {%- if image -%}
+      <img src="{{ image }}" alt="{{ alt or '' }}" loading="lazy" decoding="async">
+    {%- else -%}
+      <span class="art-fallback">{{ icon("image-off", size=16) }}</span>
+    {%- endif -%}
+  </span>
+{%- endmacro %}
+
+
+{# Up to four covers as a 2x2 mosaic. One cover fills the square; two or three
+   use a stable layout rather than stretching a cover to fit. #}
+{% macro art_mosaic(covers, alt, size="") %}
+  {%- set n = covers|length -%}
+  <span class="art mosaic mosaic-{{ n if n <= 4 else 4 }} {{ size }}" role="img"
+        aria-label="{{ alt }}">
+    {%- if n -%}
+      {%- for cover in covers[:4] -%}
+      <img src="{{ cover }}" alt="" loading="lazy" decoding="async">
+      {%- endfor -%}
+    {%- else -%}
+      <span class="art-fallback">{{ icon("music-2", size=18) }}</span>
+    {%- endif -%}
+  </span>
+{%- endmacro %}
+
+
+{# A song/artist pair with its album art, for table cells. #}
+{% macro song_cell(image, title, subtitle) %}
+  <div class="media">
+    {{ album_art(image, "") }}
+    <div class="media-body">
+      {# title attribute so a truncated name is still readable on hover. #}
+      <div class="media-title" title="{{ title or '' }}">{{ title or "—" }}</div>
+      {% if subtitle %}<div class="media-sub" title="{{ subtitle }}">{{ subtitle }}</div>{% endif %}
+    </div>
+  </div>
+{%- endmacro %}
+
+
+{% macro empty_state(icon_name, title, hint="", compact=False) %}
+  <div class="empty{% if compact %} empty-compact{% endif %}">
+    <span class="empty-icon">{{ icon(icon_name, size=22) }}</span>
+    <p class="empty-title">{{ title }}</p>
+    {% if hint %}<p class="empty-hint">{{ hint }}</p>{% endif %}
+  </div>
+{%- endmacro %}
+
+
+{# Same as empty_state, but usable with {% call %} to append an action button. #}
+{% macro empty_state_action(icon_name, title, hint="") %}
+  <div class="empty">
+    <span class="empty-icon">{{ icon(icon_name, size=22) }}</span>
+    <p class="empty-title">{{ title }}</p>
+    {% if hint %}<p class="empty-hint">{{ hint }}</p>{% endif %}
+    <div class="empty-actions">{{ caller() }}</div>
+  </div>
+{%- endmacro %}
+
+
+{% macro empty_row(colspan, icon_name, title, hint="") %}
+  <tr class="empty-tr">
+    <td class="empty-cell" colspan="{{ colspan }}">{{ empty_state(icon_name, title, hint) }}</td>
+  </tr>
+{%- endmacro %}
+
+
+{% macro stat_card(value, label, icon_name, href=None) %}
+  {%- if href -%}<a class="stat-card" href="{{ href }}">{%- else -%}<div class="stat-card">{%- endif -%}
+    <span class="stat-icon">{{ icon(icon_name, size=18) }}</span>
+    <span class="stat-body">
+      <span class="stat-value">{{ value }}</span>
+      <span class="stat-label">{{ label }}</span>
+    </span>
+    {%- if href -%}<span class="stat-go">{{ icon("chevron-right", size=16) }}</span>{%- endif -%}
+  {%- if href -%}</a>{%- else -%}</div>{%- endif -%}
+{%- endmacro %}
+
+
+{# --------------------------------------------------------------------------
+   Donut chart of the rarity mix.
+
+   Drawn as a single circle whose stroke-dasharray is walked segment by segment,
+   so there is no chart library and nothing to load. `counts` is {rarity: n}.
+   -------------------------------------------------------------------------- #}
+{% macro rarity_donut(counts, diameter=200) %}
+  {%- set total = counts.values()|sum -%}
+  {%- set r = 15.9154943092 -%}{# circumference == 100, so percentages map 1:1 #}
+
+  <div class="donut-wrap">
+    {%- if total -%}
+    <div class="donut" style="--donut-size: {{ diameter }}px">
+      <svg viewBox="0 0 42 42" role="img"
+           aria-label="Rarity mix across {{ total }} songs:
+             {%- for rar in RARITY_ORDER %}{% if counts.get(rar) %}
+             {%- set p = counts[rar] / total * 100 -%}
+             {{ counts[rar] }} {{ rar }} ({{ "less than 1%" if p|round|int == 0 else (p|round|int ~ "%") }}){{ "," if not loop.last }}
+             {%- endif %}{% endfor %}">
+        <circle class="donut-track" cx="21" cy="21" r="{{ r }}"></circle>
+        {%- set ns = namespace(offset=25) -%}
+        {%- for rar in RARITY_ORDER -%}
+          {%- if counts.get(rar) -%}
+            {%- set pct = counts[rar] / total * 100 -%}
+            <circle class="donut-seg seg-{{ rar }}" cx="21" cy="21" r="{{ r }}"
+                    stroke-dasharray="{{ pct|round(3) }} {{ (100 - pct)|round(3) }}"
+                    stroke-dashoffset="{{ ns.offset|round(3) }}"></circle>
+            {#- dashoffset runs backwards, so each slice starts where the last ended -#}
+            {%- set ns.offset = ns.offset - pct -%}
+          {%- endif -%}
+        {%- endfor -%}
+      </svg>
+      <div class="donut-center" aria-hidden="true">
+        <span class="donut-total">{{ total }}</span>
+        <span class="donut-caption">{{ "song" if total == 1 else "songs" }}</span>
+      </div>
+    </div>
+
+    <ul class="donut-legend">
+      {%- for rar in RARITY_ORDER -%}
+        {%- if counts.get(rar) -%}
+        {%- set pct = counts[rar] / total * 100 -%}
+        <li>
+          <span class="legend-dot dot-{{ rar }}" aria-hidden="true"></span>
+          <span class="legend-name">{{ rar }}</span>
+          <span class="legend-count">{{ counts[rar] }}</span>
+          {# A tier with one song out of hundreds rounds to 0%, which reads as
+             "none". Show "<1%" so a present-but-tiny tier is not denied. #}
+          <span class="legend-pct">{{ "<1%" if pct|round|int == 0 else (pct|round|int ~ "%") }}</span>
+        </li>
+        {%- endif -%}
+      {%- endfor -%}
+    </ul>
+    {%- else -%}
+    {{ empty_state("music-2", "No songs to break down yet", compact=True) }}
+    {%- endif -%}
+  </div>
+{%- endmacro %}

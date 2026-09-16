@@ -1,44 +1,218 @@
 {% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% from "_macros.html" import rarity_donut, album_art, empty_state %}
 {% block title %}{{ artist }} – Grails-Bot Admin{% endblock %}
 {% block content %}
-<p><a href="{{ url_for('catalog.artists') }}">&laquo; All artists</a></p>
-<h1>{{ artist }}</h1>
 
-<h2>Rarity Breakdown</h2>
-<ul class="rarity-stats">
-  {% for rarity, count in rarity_counts.items() %}
-  <li>{{ rarity }}: {{ count }}</li>
-  {% endfor %}
-</ul>
+<a class="backlink" href="{{ url_for('catalog.artists') }}">{{ icon("chevron-left", size=15) }}All artists</a>
 
-<h2>Songs</h2>
-{% for album_name, data in albums.items() %}
-<h3>{{ album_name }} <span class="muted">({{ data.category }})</span></h3>
-<table class="table">
-  <thead><tr><th>Song</th><th>Rarity</th></tr></thead>
-  <tbody>
-    {% for song in data.songs %}
-    <tr>
-      <td>{{ song.name }}</td>
-      <td>
-        <form method="post" action="{{ url_for('catalog.set_song_rarity', artist=artist, song_id=song.id) }}" class="inline-form">
-          <select name="rarity" onchange="this.form.submit()">
-            {% for r in rarities %}
-            <option value="{{ r }}" {% if r == song.rarity %}selected{% endif %}>{{ r }}</option>
-            {% endfor %}
-          </select>
-        </form>
-      </td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
-{% endfor %}
+{# --- Artist summary: pull activity on the left, rarity mix on the right. --- #}
+<section class="panel artist-summary">
+  {# Identity and stats share the left column so the chart can start at the very
+     top of the card; that keeps the whole block about one donut tall. #}
+  <div class="summary-main">
+    <header class="summary-head">
+      <h1>{{ artist }}</h1>
+      <p class="title-meta data">
+        {{ song_count }} {{ "song" if song_count == 1 else "songs" }}
+        <span class="sep">·</span>
+        {{ albums|length }} {{ "album" if albums|length == 1 else "albums" }}
+      </p>
+    </header>
 
-<h2>Danger Zone</h2>
-<form method="post" action="{{ url_for('catalog.remove_artist', artist=artist) }}"
-      onsubmit="return confirm('Permanently remove all songs/albums for {{ artist }}? This cannot be undone.');">
-  <input type="hidden" name="confirm" value="yes">
-  <button type="submit" class="btn-danger">Remove {{ artist }} entirely</button>
-</form>
+    <div class="summary-stats">
+      <div class="mini-stat">
+        <span class="mini-icon">{{ icon("library-big", size=15) }}</span>
+        <span class="mini-body">
+          <span class="mini-value">{{ stats.copies }}</span>
+          <span class="mini-label">Copies pulled</span>
+        </span>
+      </div>
+
+      <div class="mini-stat">
+        <span class="mini-icon">{{ icon("gem", size=15) }}</span>
+        <span class="mini-body">
+          <span class="mini-value">{{ stats.mythics }}</span>
+          <span class="mini-label">Mythics collected</span>
+        </span>
+      </div>
+
+      <div class="mini-stat">
+        <span class="mini-icon">{{ icon("trending-up", size=15) }}</span>
+        <span class="mini-body">
+          <span class="mini-value">
+            {%- if popularity.rank -%}
+              #{{ popularity.rank }}<span class="mini-of">/{{ popularity.total }}</span>
+            {%- else -%}—{%- endif -%}
+          </span>
+          {# Ranked on copies pulled, so ties share a place. #}
+          <span class="mini-label">Popularity rank</span>
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <div class="summary-chart">
+    {{ rarity_donut(rarity_counts, diameter=150) }}
+  </div>
+</section>
+
+<section class="section">
+  <div class="section-head">
+    <h2>Discography</h2>
+
+    <div class="wb-filters">
+      {% if type_counts|length > 1 %}
+      {# Filters the album pane; app.js moves selection to the first album that
+         is still visible so the track pane never shows a hidden album. #}
+      <div class="segmented" role="group" aria-label="Filter albums by release type">
+        <button type="button" class="seg-btn" data-album-filter="all" aria-pressed="true">
+          All <span class="seg-count data">{{ albums|length }}</span>
+        </button>
+        {% for cat in ["Album", "EP", "Single"] %}
+          {% if type_counts.get(cat) %}
+          <button type="button" class="seg-btn" data-album-filter="{{ cat }}" aria-pressed="false">
+            {{ cat }}{{ "s" if cat != "EP" }} <span class="seg-count data">{{ type_counts[cat] }}</span>
+          </button>
+          {% endif %}
+        {% endfor %}
+      </div>
+      {% endif %}
+
+      {% if rarity_counts %}
+      <label class="filter-select">
+        <span class="visually-hidden">Filter tracks by rarity</span>
+        {{ icon("funnel", size=14) }}
+        <select data-rarity-filter>
+          <option value="all">All rarities</option>
+          {% for r in rarity_order %}
+            {% if rarity_counts.get(r) %}
+            <option value="{{ r }}">{{ r }} ({{ rarity_counts[r] }})</option>
+            {% endif %}
+          {% endfor %}
+        </select>
+      </label>
+      {% endif %}
+    </div>
+  </div>
+
+  {% if albums %}
+  <div class="workbench">
+
+    <div class="wb-albums" role="tablist" aria-label="Albums" aria-orientation="vertical">
+      {% for album in albums %}
+      <button type="button" role="tab" class="wb-album"
+              id="tab-{{ album.id }}"
+              data-album-type="{{ album.category }}"
+              {# Lets the rarity filter hide albums with no matching track
+                 without walking every panel's rows. #}
+              data-album-rarities="{{ album.songs|map(attribute='rarity')|unique|join(' ') }}"
+              aria-controls="panel-{{ album.id }}"
+              aria-selected="{{ 'true' if loop.first else 'false' }}"
+              tabindex="{{ '0' if loop.first else '-1' }}">
+        <span class="wb-spine" aria-hidden="true"></span>
+        {{ album_art(album.image, "") }}
+        <span class="wb-album-body">
+          <span class="wb-album-name" title="{{ album.name }}">{{ album.name }}</span>
+          <span class="wb-album-meta data">
+            {{ album.category }} <span class="sep">·</span>
+            {{ album.songs|length }} {{ "track" if album.songs|length == 1 else "tracks" }}
+          </span>
+        </span>
+        <span class="wb-album-go">{{ icon("chevron-right", size=15) }}</span>
+      </button>
+      {% endfor %}
+      <p class="wb-empty muted" hidden>No releases match these filters.</p>
+    </div>
+
+    <div class="wb-tracks">
+      {% for album in albums %}
+      <section class="wb-panel" role="tabpanel" id="panel-{{ album.id }}"
+               aria-labelledby="tab-{{ album.id }}" tabindex="0"
+               {% if not loop.first %}hidden{% endif %}>
+
+        <header class="wb-head">
+          {{ album_art(album.image, "", "art-md") }}
+          <div class="wb-head-body">
+            <h3 class="wb-head-title" title="{{ album.name }}">{{ album.name }}</h3>
+            <p class="wb-head-meta data">
+              {{ album.category }} <span class="sep">·</span>
+              {{ album.songs|length }} {{ "track" if album.songs|length == 1 else "tracks" }}
+            </p>
+          </div>
+        </header>
+
+        <div class="table-wrap">
+          <table class="table table-tracks">
+            <thead>
+              <tr>
+                <th class="col-no data">#</th>
+                <th>Song</th>
+                <th class="col-rarity">Rarity</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for song in album.songs %}
+              {# data-track-rarity is kept in step by app.js after a save, so the
+                 rarity filter stays truthful without a page reload. #}
+              <tr data-track-rarity="{{ song.rarity }}">
+                <td class="col-no data muted">{{ loop.index }}</td>
+                <td class="track-name">{{ song.name }}</td>
+                <td class="col-rarity">
+                  {# A song could carry a value outside the current scale. Keep it
+                     as an option so opening the select never silently rewrites
+                     what is stored; picking a real tier is what saves. #}
+                  {% set options = rarities if song.rarity in rarities else rarities + [song.rarity] %}
+                  <form method="post" class="rarity-form"
+                        action="{{ url_for('catalog.set_song_rarity', artist=artist, song_id=song.id) }}">
+                    <label class="visually-hidden" for="rarity-{{ song.id }}">Rarity for {{ song.name }}</label>
+                    <select class="rarity-select" id="rarity-{{ song.id }}" name="rarity"
+                            data-rarity="{{ song.rarity }}" data-rarity-select>
+                      {% for r in options %}
+                      <option value="{{ r }}" {% if r == song.rarity %}selected{% endif %}>{{ r }}</option>
+                      {% endfor %}
+                    </select>
+                    {# Save feedback lands here. Width is reserved so confirming a
+                       save never nudges the select sideways. #}
+                    <span class="rarity-feedback" data-save-feedback aria-live="polite"></span>
+                    <noscript><button type="submit" class="btn btn-sm">Save</button></noscript>
+                  </form>
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          <p class="wb-no-tracks muted" hidden>No tracks of that rarity on this release.</p>
+        </div>
+      </section>
+      {% endfor %}
+    </div>
+  </div>
+
+  {% else %}
+  <div class="panel">
+    {{ empty_state("disc-3", "No albums found", "Nothing is linked to this artist in the catalog.") }}
+  </div>
+  {% endif %}
+</section>
+
+<section class="section">
+  <div class="panel panel-danger danger-bar">
+    <div class="danger-text">
+      <h2 class="panel-title">Danger zone</h2>
+      <p class="danger-copy">Removes every song and album for {{ artist }} from the catalog.</p>
+    </div>
+    <form method="post" action="{{ url_for('catalog.remove_artist', artist=artist) }}"
+          data-confirm
+          data-confirm-title="Permanently remove {{ artist }}?"
+          data-confirm-body="This deletes all {{ song_count }} songs and {{ albums|length }} albums for {{ artist }} from the catalog. Player collections keep their rows, but these songs can no longer be pulled. This cannot be undone."
+          data-confirm-verb="Permanently remove artist">
+      <input type="hidden" name="confirm" value="yes">
+      <button type="submit" class="btn btn-danger">
+        {{ icon("trash-2", size=15) }}Permanently remove artist
+      </button>
+    </form>
+  </div>
+</section>
+
 {% endblock %}

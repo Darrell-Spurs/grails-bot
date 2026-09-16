@@ -1,5 +1,6 @@
 import os, sys
 import asyncio
+import time
 import random
 import logging
 
@@ -7,14 +8,21 @@ from db import (add_song_to_collection, get_song_and_album_details,
                 add_user_xp, get_user_xp, get_mythic_copy_info, can_collect_mythic,
                 get_next_mythic_copy_number, get_song_rarity,
                 get_available_mythic_songs_for_user, user_owns_mythic,
+                get_mythic_pull_state,
                 get_mythic_hunt, set_mythic_hunt, clear_mythic_hunt, add_vinyl_count)
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import discord
 from discord.ext import commands
-from utils.helpers import (get_random_song, make_3_song_collage, get_random_album,
-                           draw_variant, SOURPATCH_ID, SOURPATCH_IMAGE, IMAGES_DIR)
+from utils.helpers import (get_random_song, get_random_songs, make_3_song_collage,
+                           get_random_album, draw_variant, SOURPATCH_ID, SOURPATCH_IMAGE,
+                           IMAGES_DIR)
 from utils.mystic import main as generate_mythic_gif
+import db
+from utils import economy, odds
+from utils import aesthetics
+from utils.errors import report_unhandled
+from utils.logsetup import event
 
 log = logging.getLogger("grails.choice")
 
@@ -24,6 +32,13 @@ rarity_multiplier = {
     "elite": 2,
     "unique": 1.5,
     "basic": 1
+}
+
+variant_multiplier = {
+    "mythic": 1200,
+    "sketch": 500,
+    "glitched": 100,
+    "default": 30
 }
 
 # ✅ View for button UI
@@ -69,47 +84,27 @@ class ChooseSongView(discord.ui.View):
             copy_number = get_next_mythic_copy_number(song_id)
 
         add_song_to_collection(interaction.user.id, song_id=song_id, album_id=album_id, variant=variant)
-        log.info("Added %s %s by %s to %s's collection", variant, song_name, artist, interaction.user.display_name)
+        event(log, "pull selected", "%s by %s [%s/%s] -> %s's collection",
+               song_name, artist, rarity, variant, interaction.user.name)
 
         xp_cog = interaction.client.get_cog('XPCog')
         user_xp = get_user_xp(interaction.user.id)
         level_checkpoint = xp_cog.get_level_from_xp(user_xp)
 
-        if variant == "mythic":
-            # Add mythic XP bonus
-            add_user_xp(interaction.user.id, 1200 * rarity_multiplier.get(rarity, 1))
-        elif variant == "sketch":
-            # Add rare XP bonus
-            add_user_xp(interaction.user.id, 500 * rarity_multiplier.get(rarity, 1))
-        elif variant == "glitched":
-            # Add glitched XP bonus
-            add_user_xp(interaction.user.id, 100 * rarity_multiplier.get(rarity, 1))
-        else:
-            # Add normal XP bonus
-            add_user_xp(interaction.user.id, 30 * rarity_multiplier.get(rarity, 1))
+        added_xp = variant_multiplier.get(variant, 1) * rarity_multiplier.get(rarity, 1)
+        add_user_xp(interaction.user.id, added_xp)
 
         # Check for level-up after adding XP
         if xp_cog:
             await xp_cog.check_level_up(interaction.user.id, level_checkpoint, interaction.message.channel, interaction.user)
 
-        variant_text = f" *({variant})*" if variant != "default" else ""
-        copy_text = f" **#{copy_number}**" if variant == "mythic" else ""
-
+        glyph = aesthetics.card_emoji(rarity, variant)
 
         # Create embed for the selection message
 
-        color_map = {
-            "ultimate": discord.Color.gold(),
-            "legendary": discord.Color.orange(),
-            "elite": discord.Color.red(),
-            "unique": discord.Color.purple(),
-            "basic": discord.Color.blue(),
-        }
-
-        # Add variant-specific color and emoji
         embed = discord.Embed(
-            description=f"**{interaction.user.display_name}** picked **{song_name}**{variant_text}{copy_text} by **{artist}**",
-            color=color_map.get(rarity, discord.Color.blue())
+            description=f"{glyph} **{interaction.user.display_name}** picked **{song_name}** by **{artist}** (+{int(added_xp)} XP)",
+            color=discord.Color(aesthetics.rarity_colour_int(rarity)),
         )
 
         await interaction.message.channel.send(embed=embed)
@@ -117,16 +112,18 @@ class ChooseSongView(discord.ui.View):
 
 # ✅ View for mythic claim button
 class MythicClaimView(discord.ui.View):
-    def __init__(self, ctx: commands.Context, song_id: str, album_id: str, song_name: str, artist: str):
+    def __init__(self, ctx: commands.Context, song_id: str, album_id: str, song_name: str, artist: str, rarity: str):
         super().__init__(timeout=60)
         self.ctx = ctx
         self.song_id = song_id
         self.album_id = album_id
         self.song_name = song_name
         self.artist = artist
+        self.rarity = rarity
+        self.emoji = aesthetics.card_emoji(rarity, "mythic")
         self.claimed = False
 
-    @discord.ui.button(label="🪄 Claim Mythic", style=discord.ButtonStyle.success, emoji="💎")
+    @discord.ui.button(label="🪄 Claim Mythic", style=discord.ButtonStyle.success)
     async def claim_mythic(self, interaction: discord.Interaction, button: discord.ui.Button):    
 
         if interaction.user != self.ctx.author:
@@ -139,12 +136,12 @@ class MythicClaimView(discord.ui.View):
 
         # Check if mythic can still be collected
         if not can_collect_mythic(self.song_id):
-            await interaction.response.send_message("❌ This mythic has reached its maximum number of copies (3/3) and can no longer be collected!", ephemeral=True)
+            await interaction.response.send_message("This mythic has reached its maximum number of copies (3/3) and can no longer be collected!", ephemeral=True)
             return
 
         # Check if user already owns this mythic
         if user_owns_mythic(interaction.user.id, self.song_id):
-            await interaction.response.send_message("❌ You already own a copy of this mythic song!", ephemeral=True)
+            await interaction.response.send_message("You already own a copy of this mythic song!", ephemeral=True)
             return
 
         # Get the copy number before adding to collection
@@ -157,8 +154,8 @@ class MythicClaimView(discord.ui.View):
         xp_cog = interaction.client.get_cog('XPCog')
         user_xp = get_user_xp(interaction.user.id)
         level_checkpoint = xp_cog.get_level_from_xp(user_xp)
-        add_user_xp(interaction.user.id, 1200 * rarity_multiplier.get(get_song_rarity(self.song_id), 1))
-        
+        add_user_xp(interaction.user.id, variant_multiplier.get("mythic", 1) * rarity_multiplier.get(get_song_rarity(self.song_id), 1))
+
         # Check for level-up after adding XP
         if xp_cog:
             await xp_cog.check_level_up(interaction.user.id, level_checkpoint, interaction.message.channel, interaction.user)
@@ -173,7 +170,7 @@ class MythicClaimView(discord.ui.View):
         button.style = discord.ButtonStyle.secondary
 
         await interaction.response.edit_message(view=self)
-        await interaction.followup.send(f"**{interaction.user.display_name}** claimed the mythic: **{self.song_name} #{copy_number}** by **{self.artist}**! 💎")
+        await interaction.followup.send(f"**{interaction.user.display_name}** claimed** {self.emoji} {self.song_name} #{copy_number}** by **{self.artist}**!")
 
     async def on_timeout(self):
         # Disable button when view times out
@@ -182,14 +179,72 @@ class MythicClaimView(discord.ui.View):
         # Note: The message won't be updated automatically on timeout unless we have a reference to it
 
 # ✅ Cog containing the command
+def _resolve_mythic(user_id, variants, songs, ids, albums, artists):
+    """Decide which mythic a pull awards. Pure database work, so it runs in a
+    worker thread over one shared connection instead of half a dozen.
+
+    Returns (song_id, song_name, artist, album_id, album_name, album_url,
+    next_copy_number, rarity), or None when the user has no mythic left to
+    claim. The rarity is the awarded song's own, looked up here rather than
+    passed in, because the song can change inside this function.
+    """
+    with db.shared_connection():
+        hunt = get_mythic_hunt()
+        if hunt:
+            song_name = hunt['song_name']
+            song_id = hunt['song_id']
+            album_id = hunt['album_id']
+            album_name = hunt['album_name']
+            album_url = hunt['album_url']
+            artist = hunt['artist']
+            clear_mythic_hunt()
+            event(log, "mythic hunt", "triggered: %s by %s", song_name, artist)
+        else:
+            index = variants.index("mythic")
+            song_name = songs[index]
+            song_id = ids[index]
+            album_id, album_name, album_url = albums[index]
+            artist = artists[index]
+            event(log, "mythic rolled", "%s by %s", song_name, artist)
+
+        # Copy count, ownership and rarity in one round trip instead of four.
+        state = get_mythic_pull_state(song_id, user_id)
+
+        # Already maxed out, or this player owns it: swap in one they can claim.
+        if not state['can_collect'] or state['user_owns']:
+            available = get_available_mythic_songs_for_user(user_id)
+            if not available:
+                return None
+            # Read off the state we already have -- this used to re-run the
+            # copy-count query just to word a log line.
+            reason = "maxed out" if not state['can_collect'] else "already owned"
+            song_id, song_name, artist = random.choice(available)
+            album_id, album_name, album_url = get_random_album(song_id)
+            state = get_mythic_pull_state(song_id, user_id)
+            event(log, "mythic swapped", "%s -> %s by %s", reason, song_name, artist)
+
+        next_copy_number = state['next_copy_number']
+
+        # The rarity of whichever song is actually being awarded, not of the
+        # drawn pick: the hunt branch never had a pick to read, and the swap
+        # above can replace the song with one of a different tier.
+        rarity = state['rarity']
+
+    return song_id, song_name, artist, album_id, album_name, album_url, next_copy_number, rarity
+
+
 class ChoiceCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        # One lock per player, so two fast `.c` invocations cannot both read the
+        # same charge balance and each spend it. Keyed by user id; the dict is
+        # bounded by the number of people who have ever pulled this run.
+        self._pull_locks = {}
 
     async def _maybe_sourpatch_bonus(self, ctx):
-        """1% chance after a pull: a Sour Patch Kids appears and either levels the
-        user up to the next level or grants a free vinyl pull (50/50)."""
-        if random.random() >= 0.01:
+        """After any pull, a Sour Patch Kids may appear and either level the user
+        up or grant a free vinyl pull. Both odds live in utils/odds.py."""
+        if random.random() >= odds.SOUR_PATCH_ODDS:
             return
         xp_cog = self.bot.get_cog('XPCog')
         file = discord.File(SOURPATCH_IMAGE, filename="sourpatchkids.png")
@@ -198,7 +253,7 @@ class ChoiceCog(commands.Cog):
             color=discord.Color.from_rgb(140, 200, 90))
         embed.set_image(url="attachment://sourpatchkids.png")
 
-        if random.random() < 0.5 or xp_cog is None:
+        if random.random() < odds.SOUR_PATCH_VINYL_SPLIT or xp_cog is None:
             add_vinyl_count(ctx.author.id, 1)
             embed.description = f"**{ctx.author.display_name}** got a **free vinyl pull!** 💿"
             await ctx.send(embed=embed, file=file)
@@ -211,34 +266,86 @@ class ChoiceCog(commands.Cog):
             await ctx.send(embed=embed, file=file)
             await xp_cog.check_level_up(ctx.author.id, level, ctx.channel, ctx.author)
 
-    @commands.hybrid_command(name="choice", aliases=["c"], description="Get 3 random songs to choose from")
-    @commands.cooldown(rate=1, per=5, type=commands.BucketType.user)
+    @commands.command(name="choice", aliases=["c"], description="Get 3 random songs to choose from")
+    @commands.cooldown(rate=1, per=3, type=commands.BucketType.user)
     async def choice(self, ctx):
+        """Spend one drop charge, then run a pull.
 
-        # Fetch 3 random songs (DB work offloaded so the event loop stays free)
-        def _fetch_three():
-            picks = [get_random_song() for _ in range(3)]
-            albums_ = [get_random_album(p[1]) for p in picks]
-            rarities_ = [get_song_rarity(p[1]) for p in picks]
-            return picks, albums_, rarities_
+        The charge is taken before any work starts, so a pull can never be had
+        for free by firing the command twice quickly. The per-user lock is what
+        makes that true: spend_pull_charge reads and writes in two statements,
+        which two concurrent invocations could interleave.
 
-        picks, albums, rarities = await asyncio.to_thread(_fetch_three)
-        (song1, id_1, artist1), (song2, id_2, artist2), (song3, id_3, artist3) = picks
-        album1, album2, album3 = albums
+        The retry path inside _run_choice calls _run_choice directly rather than
+        this wrapper, so redrawing after an unavailable mythic does not charge
+        the player a second time.
+        """
+        lock = self._pull_locks.setdefault(ctx.author.id, asyncio.Lock())
+        async with lock:
+            spent, status = await asyncio.to_thread(db.spend_pull_charge, ctx.author.id)
 
-        songs = [song1, song2, song3]
-        image_urls = [album1[2], album2[2], album3[2]]
-        ids = [id_1, id_2, id_3]
-        titles = [song1, song2, song3]
-        artists = [artist1, artist2, artist3]
+        if not spent:
+            await ctx.send(embed=self._no_charges_embed(ctx, status))
+            return
+
+        try:
+            await self._run_choice(ctx)
+        except Exception:
+            # The charge bought nothing, so give it back. Refunding before the
+            # re-raise means the error still reaches the handler and the log.
+            await asyncio.to_thread(db.add_pull_charges, ctx.author.id, economy.PULL_COST)
+            event(log, "drop refunded", "%s   after a failed pull", ctx.author.name)
+            raise
+
+    def _no_charges_embed(self, ctx, status):
+        """Shown when the stack is empty -- with the wait, not just a refusal."""
+        wait = economy.format_duration(status["next_in"]) if status else "a few minutes"
+        embed = discord.Embed(
+            title="\u26A1 Out of drops",
+            description=f"Your next drop lands in **{wait}**.",
+            colour=discord.Colour(aesthetics.ACCENT_COLOR_INT),
+        )
+        if status:
+            embed.add_field(
+                name=f"{status['charges']} / {status['cap']}",
+                value=f"`{economy.charge_bar(status['charges'])}`",
+                inline=False,
+            )
+        embed.set_footer(text=f"One drop every {economy.PULL_REGEN_SECONDS // 60} minutes, "
+                              f"up to {economy.PULL_CAP}.  ·  /pulls to check")
+        return embed
+
+    async def _run_choice(self, ctx):
+        # Prefix-only now, so there is no interaction deadline to beat; defer()
+        # is a harmless no-op kept in case this ever regains a slash form.
+        await ctx.defer()
+        started = time.perf_counter()
+        event(log, "pull requested", "%s", ctx.author.name)
+
+        # One query for all three picks, album art and rarity included --
+        # previously nine sequential round-trips.
+        picks = await asyncio.to_thread(get_random_songs, 3)
+        picked_ms = (time.perf_counter() - started) * 1000
+
+        albums = [(p["album_id"], p["album_name"], p["album_image"]) for p in picks]
+        songs = [p["song_name"] for p in picks]
+        ids = [p["song_id"] for p in picks]
+        titles = list(songs)
+        artists = [p["artist"] for p in picks]
+        rarities = [p["rarity"] for p in picks]
+        image_urls = [p["album_image"] for p in picks]
         variants = [draw_variant(), draw_variant(), draw_variant()]
+        event(log, "pull responded", "%s   [%.0fms]",
+              "  |  ".join(f"{p['song_name']} [{p['rarity']}/{v}]"
+                           for p, v in zip(picks, variants)),
+              picked_ms)
 
         if "gutscookie" in variants and "mythic" not in variants:
-            gutscookie_xp = 1500
+            gutscookie_xp = odds.SOUR_PATCH_GUTSCOOKIE_XP
             cookie_path = os.path.join(IMAGES_DIR, "gutscookie.png")
             file = discord.File(cookie_path, filename="gutscookie.png")
             embed = discord.Embed(
-                title=f"🍪 **{ctx.author.display_name} pulled a GUTS COOKIE** 🍪",
+                title=f"**{ctx.author.display_name} pulled a GUTS COOKIE**",
                 description=f"Enjoy your treat and {gutscookie_xp} XP!",
                 color=discord.Color.from_rgb(215, 175, 199)
             )
@@ -262,85 +369,16 @@ class ChoiceCog(commands.Cog):
             return
 
         if "mythic" in variants:
-            # Check if there's an active hunt
-            hunt = get_mythic_hunt()
-            if hunt:
-                # Use the hunted song
-                song_name = hunt['song_name']
-                song_id = hunt['song_id']
-                album_id = hunt['album_id']
-                album_name = hunt['album_name']
-                album_url = hunt['album_url']
-                artist = hunt['artist']
-
-                # Clear the hunt after use
-                clear_mythic_hunt()
-
-                log.info("HUNT TRIGGERED: %s by %s", song_name, artist)
-            else:
-                # Use the random mythic song
-                index = variants.index("mythic")
-                song_name = songs[index]
-                song_id = ids[index]
-                album = albums[index]
-                album_id = album[0]
-                album_name = album[1]
-                album_url = album[2]
-                artist = artists[index]
-                log.info("Random mythic: %s by %s", song_name, artist)
-
-            # Check if mythic can still be collected and user doesn't already own it
-            if not can_collect_mythic(song_id) or user_owns_mythic(ctx.author.id, song_id):
-                # Try to find another mythic that can still be collected and user doesn't own
-                available_mythics = get_available_mythic_songs_for_user(ctx.author.id)
-
-                if available_mythics:
-                    # Pick a random available mythic
-                    random_mythic = random.choice(available_mythics)
-                    song_id, song_name, artist = random_mythic
-
-                    # Get album info for this song
-                    album = get_random_album(song_id)
-                    album_id = album[0]
-                    album_name = album[1]
-                    album_url = album[2]
-
-                    reason = "maxed out" if not can_collect_mythic(song_id) else "already owned"
-                    log.info("Replaced %s mythic with: %s by %s", reason, song_name, artist)
-                else:
-                    # No available mythics left for this user, fall back to regular choice
-                    log.info("No mythics available for this user, generating regular choices")
-                    return await self.choice(ctx)
-
-            # Get copy information
-            copy_info = get_mythic_copy_info(song_id)
-            next_copy_number = copy_info['next_copy_number']
-
-            # Send congratulations message first
-            # await ctx.send(f"*🎉 Congratulations {ctx.author.display_name}, you just pulled a mythic! 🎉*")
-
-            embed = discord.Embed(
-                title=f"💎 **{ctx.author.display_name} PULLED A MYTHIC SONG** 💎",
-                description=f"||**{song_name}**|| ||**#{next_copy_number}**|| by ||**{artist}**|| from ||*{album_name}*||\n\n"
-                           f"Click the button below to claim this mythic song!",
-                color=discord.Color.from_rgb(140, 202, 247)
+            # Resolving a mythic takes half a dozen queries. They used to run
+            # inline on the event loop, one connection each; now they go to a
+            # worker thread over a single shared connection.
+            resolved = await asyncio.to_thread(
+                _resolve_mythic, ctx.author.id, variants, songs, ids, albums, artists
             )
-
-            # Generate the mythic GIF in memory, off the event loop
-            gif_buf = await asyncio.to_thread(generate_mythic_gif, album_url, True)
-
-            # Create the claim view
-            claim_view = MythicClaimView(ctx, song_id, album_id, song_name, artist)
-
-            if gif_buf is not None:
-                file = discord.File(gif_buf, filename="mythic_animated.gif", spoiler=True)
-                embed.set_image(url="attachment://mythic_animated.gif")
-                await ctx.send(embed=embed, file=file, view=claim_view)
-            else:
-                await ctx.send(embed=embed, content="(Missing mythic gif ❗)", view=claim_view)
-
-            await self._maybe_sourpatch_bonus(ctx)
-            return
+            if resolved is None:
+                event(log, "mythic swapped", "none available for this user, redrawing")
+                return await self._run_choice(ctx)
+            return await self._send_mythic(ctx, resolved)
 
         collage_buf = await asyncio.to_thread(
             make_3_song_collage, image_urls, titles, artists, variants, rarities, None, True
@@ -348,13 +386,54 @@ class ChoiceCog(commands.Cog):
         file = discord.File(collage_buf, filename="choices.jpg")
 
         embed = discord.Embed(
-            title=f"🎶 **{ctx.author.display_name}'s choices**🎶",
+            title=f"**{ctx.author.display_name}'s choices**",
             description="Click a button to pick your preferred song!",
             color=discord.Color.blurple()
         )
         embed.set_image(url="attachment://choices.jpg")
 
         await ctx.send(embed=embed, file=file, view=ChooseSongView(ctx, options=[(ids[i], titles[i], artists[i], albums[i], variants[i]) for i in range(3)]))
+        event(log, "respond time", "%s   %.0fms total",
+              ctx.author.name, (time.perf_counter() - started) * 1000)
+
+        await self._maybe_sourpatch_bonus(ctx)
+
+    async def _send_mythic(self, ctx, resolved):
+        song_id, song_name, artist, album_id, album_name, album_url, next_copy_number, rarity = resolved
+
+        card_emoji = aesthetics.card_emoji(rarity, "mythic")
+        embed = discord.Embed(
+            title=f"{card_emoji} **{ctx.author.display_name} PULLED A MYTHIC**",
+            description=f"||**{song_name}**|| ||**#{next_copy_number}**|| by ||**{artist}**|| from ||*{album_name}*||\n\n",
+            color=discord.Color.from_rgb(140, 202, 247)
+        )
+        claim_view = MythicClaimView(ctx, song_id, album_id, song_name, artist, rarity)
+
+        # Post the reveal and the claim button first. Rendering the animation
+        # takes the better part of a second, and that used to be dead air before
+        # anything appeared at all -- the player can now read the spoilers and
+        # claim immediately while the GIF is edited in behind them.
+        started = time.perf_counter()
+        message = await ctx.send(embed=embed, view=claim_view)
+
+        gif_buf = await asyncio.to_thread(generate_mythic_gif, album_url, True)
+        if gif_buf is None:
+            log.warning("mythic gif generation returned nothing for %s", album_url)
+            await message.edit(content="(Missing mythic gif \u2757)")
+        else:
+            # The art stays a spoilered attachment rather than an embed image:
+            # the song name and artist are spoilered too, so revealing the cover
+            # automatically would give the answer away before the click.
+            file = discord.File(gif_buf, filename="mythic_animated.gif", spoiler=True)
+            try:
+                # `view` is deliberately not passed. The button may already have
+                # been claimed and disabled in the time the GIF took, and an edit
+                # that omits it leaves the existing components alone.
+                await message.edit(attachments=[file])
+            except discord.HTTPException:
+                log.exception("could not attach the mythic gif for %s", song_name)
+            event(log, "respond time", "mythic art for %s attached %.0fms after the reveal",
+                  song_name, (time.perf_counter() - started) * 1000)
 
         await self._maybe_sourpatch_bonus(ctx)
 
@@ -363,9 +442,12 @@ class ChoiceCog(commands.Cog):
         if isinstance(error, commands.CommandOnCooldown):
             await ctx.send(f"⏳ Cool down! Try again in {round(error.retry_after)}s.")
             return
+        # Anything else used to fall off the end here, which marks the error
+        # handled and keeps it out of the log entirely.
+        await report_unhandled(log, ctx, error, command="c")
 
     @commands.command()
-    @commands.has_role("bot_admin")
+    @commands.has_role("grails-admin")
     async def hunt(self, ctx, *, args: str):
         """Set a specific song to be the next mythic pull
         Usage: .hunt <song_name> / <album_name> / <artist>
@@ -412,7 +494,7 @@ class ChoiceCog(commands.Cog):
         await ctx.send(embed=embed)
 
     @commands.command(aliases=["clh"])
-    @commands.has_role("bot_admin")
+    @commands.has_role("grails-admin")
     async def clearhunt(self, ctx):
         """Clear the current mythic hunt"""
         old_hunt = get_mythic_hunt()
@@ -422,8 +504,8 @@ class ChoiceCog(commands.Cog):
         else:
             await ctx.send("❌ No active mythic hunt to clear.")
 
-    @commands.command()
-    @commands.has_role("bot_admin")
+    @commands.command(aliases=["ckh"])
+    @commands.has_role("grails-admin")
     async def checkhunt(self, ctx):
         """Check the current mythic hunt status"""
         hunt = get_mythic_hunt()
@@ -440,7 +522,7 @@ class ChoiceCog(commands.Cog):
             await ctx.send("❌ No active mythic hunt set.")
 
     @commands.command()
-    @commands.has_role("bot_admin")
+    @commands.has_role("grails-admin")
     async def mythicstatus(self, ctx, *, args: str):
         """Check the status of a mythic song's copies
         Usage: .mythicstatus <song_name> / <album_name> / <artist>
@@ -515,7 +597,7 @@ class ChoiceCog(commands.Cog):
         await ctx.send(embed=embed)
 
     @commands.command()
-    @commands.has_role("bot_admin")
+    @commands.has_role("grails-admin")
     async def testmythic(self, ctx, *, args: str):
         """Test the mythic copy system by checking a song's status
         Usage: .testmythic <song_name> / <album_name> / <artist>
@@ -573,7 +655,7 @@ class ChoiceCog(commands.Cog):
     @hunt.error
     async def hunt_error(self, ctx, error):
         if isinstance(error, commands.MissingRole):
-            await ctx.send("❌ You need the 'bot_admin' role to use this command!")
+            await ctx.send("❌ You need the 'grails-admin' role to use this command!")
         elif isinstance(error, commands.MissingRequiredArgument):
             await ctx.send("❌ **Missing arguments!**\n"
                           "**Usage:** `.hunt <song_name> / <album_name> / <artist>`\n"
@@ -584,21 +666,21 @@ class ChoiceCog(commands.Cog):
     @clearhunt.error
     async def clearhunt_error(self, ctx, error):
         if isinstance(error, commands.MissingRole):
-            await ctx.send("❌ You need the 'bot_admin' role to use this command!")
+            await ctx.send("❌ You need the 'grails-admin' role to use this command!")
         else:
             raise error
 
     @checkhunt.error
     async def checkhunt_error(self, ctx, error):
         if isinstance(error, commands.MissingRole):
-            await ctx.send("❌ You need the 'bot_admin' role to use this command!")
+            await ctx.send("❌ You need the 'grails-admin' role to use this command!")
         else:
             raise error
 
     @mythicstatus.error
     async def mythicstatus_error(self, ctx, error):
         if isinstance(error, commands.MissingRole):
-            await ctx.send("❌ You need the 'bot_admin' role to use this command!")
+            await ctx.send("❌ You need the 'grails-admin' role to use this command!")
         elif isinstance(error, commands.MissingRequiredArgument):
             await ctx.send("❌ **Missing arguments!**\n"
                           "**Usage:** `.mythicstatus <song_name> / <album_name> / <artist>`\n"
@@ -609,7 +691,7 @@ class ChoiceCog(commands.Cog):
     @testmythic.error
     async def testmythic_error(self, ctx, error):
         if isinstance(error, commands.MissingRole):
-            await ctx.send("❌ You need the 'bot_admin' role to use this command!")
+            await ctx.send("❌ You need the 'grails-admin' role to use this command!")
         else:
             raise error
 

@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% from "_macros.html" import rarity_badge %}
+{% block title %}Odds – Grails-Bot Admin{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <h1>Odds</h1>
+</div>
+
+<p class="page-lede">
+  Read live from <code>utils/odds.py</code> — this page cannot drift from what the bot rolls.
+  Editing a value there changes both the game and this table.
+</p>
+
+<section class="section section-tight">
+  <div class="section-head">
+    <h2>Variant odds</h2>
+    <span class="count-note data">{{ songs_per_pull }} songs per pull</span>
+  </div>
+
+  <div class="panel table-wrap">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Variant</th>
+          <th class="num">Per pull</th>
+          <th class="num">Per song</th>
+          <th>Notes</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in variant_rows %}
+        <tr>
+          <td><strong>{{ row.label }}</strong></td>
+          <td class="num data">{{ "%.3f"|format(row.per_pull * 100) }}%</td>
+          <td class="num data muted">{{ "%.3f"|format(row.per_song * 100) }}%</td>
+          <td class="hint-cell">{{ row.note }}</td>
+        </tr>
+        {% endfor %}
+        <tr>
+          <td><strong>Standard</strong></td>
+          <td class="num muted">—</td>
+          <td class="num data muted">{{ "%.3f"|format(default_per_song * 100) }}%</td>
+          <td class="hint-cell">Whatever is left over; not configured directly.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p class="hint">
+    Tunables are written per pull — the chance a single <code>.c</code> contains at least one.
+    Each is converted to a per-song probability with
+    <code>1 − (1 − p)<sup>1/{{ songs_per_pull }}</sup></code>, then rolled per song.
+  </p>
+</section>
+
+<section class="section">
+  <div class="section-head"><h2>Song rarity weights</h2></div>
+
+  <div class="odds-grid">
+    {% for table in tables %}
+    <div class="panel">
+      <div class="panel-head">
+        <h3 class="panel-title">{{ table.title }}</h3>
+        <span class="count-note data">
+          {% if (table.total - 1.0)|abs < 0.0001 %}
+            sums to 100%
+          {% else %}
+            sums to {{ "%.1f"|format(table.total * 100) }}%
+          {% endif %}
+        </span>
+      </div>
+      <div class="table-wrap">
+        <table class="table">
+          <thead><tr><th>Rarity</th><th class="num">Weight</th><th class="odds-bar-col">Share</th></tr></thead>
+          <tbody>
+            {% for rarity, weight in table.rows %}
+            <tr>
+              <td>{{ rarity_badge(rarity) }}</td>
+              <td class="num data">{{ "%.0f"|format(weight * 100) }}%</td>
+              <td class="odds-bar-col">
+                <span class="odds-bar" role="img" aria-label="{{ "%.0f"|format(weight * 100) }} percent">
+                  <span class="odds-bar-fill seg-{{ rarity }}" style="width: {{ weight * 100 }}%"></span>
+                </span>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="panel-pad"><p class="hint" style="margin:0">{{ table.note }}</p></div>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="section">
+  <div class="section-head"><h2>Other rolls</h2></div>
+  <div class="panel table-wrap">
+    <table class="table">
+      <thead><tr><th>Roll</th><th class="num">Chance</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>Sour Patch Kids</strong></td>
+          <td class="num data">{{ "%.0f"|format(sour_patch * 100) }}%</td>
+          <td class="hint-cell">Rolled after <em>every</em> pull, on top of the pull itself.</td>
+        </tr>
+        <tr>
+          <td><strong>— free vinyl vs level-up</strong></td>
+          <td class="num data">{{ "%.0f"|format(sour_patch_split * 100) }}%</td>
+          <td class="hint-cell">Split of the Sour Patch reward; the remainder levels the player up.</td>
+        </tr>
+        <tr>
+          <td><strong>Vinyl pull rolls signature odds</strong></td>
+          <td class="num data">{{ "%.0f"|format(sig_vinyl_chance * 100) }}%</td>
+          <td class="hint-cell">An ordinary <code>.vinyl</code> upgrading itself to the signature table.</td>
+        </tr>
+        <tr>
+          <td><strong>Mythic copies in existence</strong></td>
+          <td class="num data">{{ mythic_max_copies }}</td>
+          <td class="hint-cell">A hard cap per song, not a probability.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+{% endblock %}

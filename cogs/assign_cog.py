@@ -4,6 +4,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 import discord
 from discord.ext import commands
 from db import get_song_and_album_details, set_song_rarity, get_song_rarity
+from utils import aesthetics
 
 rarity_abbr = {
     "b": "basic",
@@ -28,7 +29,7 @@ class AssignCog(commands.Cog):
         return self.active_lists.get(channel_id, None)
 
     @commands.command(aliases=['a'])
-    @commands.has_role("bot_admin")
+    @commands.has_role("grails-admin")
     async def assign(self, ctx, number_or_song: str = None, rarity: str = None):
         """
         Assign rarity to a song.
@@ -199,20 +200,12 @@ class AssignCog(commands.Cog):
         await ctx.send(embed=embed)
 
     def _get_rarity_color(self, rarity):
-        """Get Discord color for each rarity"""
-        colors = {
-            "basic": discord.Color.blue(),
-            "unique": discord.Color.purple(),
-            "elite": discord.Color.red(),
-            "legendary": discord.Color.orange(),
-            "ultimate": discord.Color.gold()
-        }
-        return colors.get(rarity, discord.Color.light_grey())
+        return discord.Color(aesthetics.rarity_colour_int(rarity))
 
     @assign.error
     async def assign_error(self, ctx, error):
         if isinstance(error, commands.MissingRole):
-            await ctx.send("❌ You need the 'bot_admin' role to use this command!")
+            await ctx.send("❌ You need the 'grails-admin' role to use this command!")
         elif isinstance(error, commands.MissingRequiredArgument):
             await ctx.send("❌ **Missing arguments!**\n"
                           "**Usage:** `.assign <number> <rarity>` (from active list)\n"

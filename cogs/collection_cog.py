@@ -1,4 +1,6 @@
-import os, sys
+import os
+import sys
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import logging
@@ -7,113 +9,79 @@ from typing import Optional
 import discord
 from discord import app_commands
 from discord.ext import commands
-from discord.ext import menus
-from utils.helpers import get_collection_by_artist, get_collection_by_rarity, get_collection_by_rarity_and_artist, get_collection_by_user
-from db import (get_user_mythic_copy_number, get_collection_with_copy_numbers,
-                get_collection_by_rarity_with_copy_numbers, get_collection_by_artist_with_copy_numbers,
-                get_collection_by_rarity_and_artist_with_copy_numbers, get_all_artists)
+
+import db
+from utils.collection_ui import VARIANTS, VARIANT_LABEL, CollectionView
+from utils.command_types import slash_only
 
 log = logging.getLogger("grails.collection")
 
-RARITIES = ["mythic", "sig_vinyl", "vinyl", "sketch", "glitched", "default"]
+
+async def _variant_autocomplete(interaction: discord.Interaction, current: str):
+    cur = (current or "").lower()
+    return [
+        app_commands.Choice(name=VARIANT_LABEL[v], value=v)
+        for v in VARIANTS if cur in v or cur in VARIANT_LABEL[v].lower()
+    ][:25]
 
 
-async def _rarity_autocomplete(interaction: discord.Interaction, current: str):
-    cur = current.lower()
-    return [app_commands.Choice(name=r.title(), value=r) for r in RARITIES if cur in r][:25]
+async def _own_artist_autocomplete(interaction: discord.Interaction, current: str):
+    """Only artists the viewer actually owns something by -- offering the whole
+    catalog would mostly suggest empty results."""
+    target = getattr(interaction.namespace, "user", None)
+    owner_id = target.id if target else interaction.user.id
+    cur = (current or "").lower()
+    try:
+        artists = db.get_user_collection_artists(owner_id)
+    except Exception:
+        log.exception("collection artist autocomplete failed")
+        return []
+    return [app_commands.Choice(name=a, value=a) for a in artists if cur in a.lower()][:25]
 
-
-async def _artist_autocomplete(interaction: discord.Interaction, current: str):
-    cur = current.lower()
-    artists = [a for a in get_all_artists() if cur in a.lower()]
-    return [app_commands.Choice(name=a, value=a) for a in artists[:25]]
-
-class CollectionPageSource(menus.ListPageSource):
-    def __init__(self, data, title):
-        self.title = title
-        super().__init__(data, per_page=20)
-
-    async def format_page(self, menu, entries):
-        embed = discord.Embed(title=self.title, color=discord.Color.teal())
-        rarity_emojis = {
-            "mythic": "💎",
-            "sig_vinyl": "🖋️",
-            "vinyl": "📀",
-            "sketch": "✏️",
-            "glitched": "🧩",
-            "default": "⚪️"
-        }
-        for entry in entries:
-            # Handle both old format (5 elements) and new format (6 elements with copy_number)
-            if len(entry) == 6:
-                name, artist, variant, album, image, copy_number = entry
-            else:
-                name, artist, variant, album, image = entry
-                copy_number = 1  # Default for non-mythic or when copy number isn't available
-
-            # Format the name with copy number for mythics
-            if variant == "mythic":
-                display_name = f"{rarity_emojis[variant]} #{copy_number} {name} - {artist}"
-            else:
-                display_name = f"{rarity_emojis[variant]} {name} - {artist}"
-
-            embed.add_field(
-                name=display_name,
-                value=f"\n *{album or 'Unknown'}*",
-                inline=False
-            )
-        embed.set_footer(text=f"Page {menu.current_page + 1}/{self.get_max_pages()}")
-        return embed
-
-class CollectionMenu(menus.MenuPages):
-    def __init__(self, source):
-        super().__init__(source=source, clear_reactions_after=True, timeout=60)
 
 class CollectionCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @commands.hybrid_command(name="collection", aliases=["col"], description="View your song collection")
-    @app_commands.describe(rarity="Filter by rarity", artist="Filter by artist")
-    @app_commands.autocomplete(rarity=_rarity_autocomplete, artist=_artist_autocomplete)
-    async def collection(self, ctx, rarity: Optional[str] = None, *, artist: Optional[str] = None):
-        user_id = str(ctx.author.id)
-        # Prefix convenience: if the first token isn't a real rarity, treat it as artist text
-        # (so `.collection Taylor Swift` still works without naming a rarity).
-        if rarity and rarity.lower() not in RARITIES:
-            artist = f"{rarity} {artist}".strip() if artist else rarity
-            rarity = None
-        rarity = rarity.lower() if rarity else None
-        log.info("%s requested collection (rarity=%s artist=%s)", ctx.author.display_name, rarity, artist)
+    @commands.hybrid_command(
+        name="collection", aliases=["col"],
+        description="Browse a user's song collection",
+    )
+    @slash_only()
+    @app_commands.describe(
+        variant="Filter by variant (mythic, signature, sketch...)",
+        artist="Filter to one artist",
+        user="Whose collection to browse (defaults to you)",
+    )
+    @app_commands.autocomplete(variant=_variant_autocomplete, artist=_own_artist_autocomplete)
+    async def collection(self, ctx, variant: Optional[str] = None,
+                         user: Optional[discord.User] = None, *,
+                         artist: Optional[str] = None):
+        # Prefix convenience: `.col taylor swift` should not require naming a
+        # variant first, so a leading token that is not a variant is artist text.
+        if variant and variant.lower() not in VARIANTS:
+            artist = f"{variant} {artist}".strip() if artist else variant
+            variant = None
+        variant = variant.lower() if variant else None
 
-        if rarity and artist:
-            results = get_collection_by_rarity_and_artist_with_copy_numbers(user_id, rarity, artist)
-            title = f"📖 {ctx.author.display_name}'s {artist.title()} {rarity.title()} Collection"
+        owner = user or ctx.author
+        log.info("%s browsing %s's collection (variant=%s artist=%s)",
+                 ctx.author.display_name, owner.display_name, variant, artist)
 
-        elif rarity:
-            results = get_collection_by_rarity_with_copy_numbers(user_id, rarity)
-            title = f"📖 {ctx.author.display_name}'s {rarity.title()} Collection"
+        view = CollectionView(
+            invoker_id=ctx.author.id,
+            owner_id=owner.id,
+            owner_name=owner.display_name,
+            variant=variant,
+            artist=artist,
+        )
 
-        elif artist:
-            results = get_collection_by_artist_with_copy_numbers(user_id, artist)
-            title = f"📖 {ctx.author.display_name}'s {artist.title()} Collection"
-
-        else:
-            results = get_collection_with_copy_numbers(user_id)
-            title = f"📖 {ctx.author.display_name}'s Collection"
-
-        if not results:
-            await ctx.send("📭 No cards found in your collection with those filters.")
+        if not view.total:
+            await ctx.send("\U0001F4ED No cards found with those filters.")
             return
 
-        menu = CollectionMenu(source=CollectionPageSource(results, title))
-        await menu.start(ctx)
+        view.message = await ctx.send(embed=view.render(), view=view)
 
-    @collection.error
-    async def collection_error(self, ctx, error):
-        if isinstance(error, commands.CommandOnCooldown):
-            await ctx.send(f"⏳ Cool down! Try again in {round(error.retry_after)}s.")
-            return
 
 async def setup(bot):
     await bot.add_cog(CollectionCog(bot))

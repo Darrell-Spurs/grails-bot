@@ -1,26 +1,76 @@
 {% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% from "_macros.html" import art_mosaic, empty_state %}
 {% block title %}Catalog – Grails-Bot Admin{% endblock %}
 {% block content %}
-<h1>Catalog</h1>
 
-<form method="get" class="inline-form">
-  <input type="text" name="q" placeholder="Search artists..." value="{{ q }}">
-  <button type="submit">Search</button>
+<div class="page-head">
+  <h1>Catalog</h1>
+
+  <form method="get" class="toolbar" role="search">
+    <label class="visually-hidden" for="artist-search">Search artists</label>
+    <div class="search">
+      <span class="search-icon">{{ icon("search", size=15) }}</span>
+      <input type="search" id="artist-search" name="q" value="{{ q }}"
+             placeholder="Search artists" title="Press / to focus"
+             data-search-focus data-search-clear>
+      {# Rendered for the committed query; app.js keeps it in sync while typing. #}
+      <button type="button" class="search-clear btn-bare" data-search-clear-btn
+              aria-label="Clear search" {% if not q %}hidden{% endif %}>{{ icon("x", size=14) }}</button>
+    </div>
+    <button type="submit" class="btn btn-ghost">Search</button>
+  </form>
+</div>
+
+<form method="post" action="{{ url_for('catalog.add_artist') }}" class="import-bar" data-busy-submit>
+  <span class="import-icon">{{ icon("download", size=16) }}</span>
+  <label class="visually-hidden" for="artist_name">Artist to import from Spotify</label>
+  <input type="text" id="artist_name" name="artist_name" placeholder="Artist name" required>
+  <button type="submit" class="btn">Import artist</button>
+  <p class="import-hint">Imports every album and single. Large discographies take a minute.</p>
+  <p class="import-pending" data-busy-note hidden>
+    {{ icon("loader-circle", size=14, cls="spin") }}Importing from Spotify — keep this tab open.
+  </p>
 </form>
 
-<h2>Import Artist from Spotify</h2>
-<form method="post" action="{{ url_for('catalog.add_artist') }}" class="inline-form">
-  <input type="text" name="artist_name" placeholder="Artist name" required>
-  <button type="submit">Import</button>
-</form>
-<p class="muted">This fetches all albums and singles from Spotify and can take a moment.</p>
+<section class="section">
+  <div class="section-head">
+    <h2>Artists</h2>
+    <span class="count-note data">{{ artists|length }}</span>
+  </div>
 
-<h2>Artists ({{ artists|length }})</h2>
-<ul class="artist-list">
-  {% for artist in artists %}
-  <li><a href="{{ url_for('catalog.artist_detail', artist=artist) }}">{{ artist }}</a></li>
+  {% if artists %}
+  <ul class="artist-grid">
+    {% for a in artists %}
+    <li>
+      <a class="artist-card" href="{{ url_for('catalog.artist_detail', artist=a.artist) }}">
+        {{ art_mosaic(a.covers, "Album covers for " ~ a.artist) }}
+        <span class="artist-body">
+          <span class="artist-name">{{ a.artist }}</span>
+          <span class="artist-meta data">
+            {{ a.song_count }} {{ "song" if a.song_count == 1 else "songs" }}
+            <span class="sep">·</span>
+            {{ a.album_count }} {{ "album" if a.album_count == 1 else "albums" }}
+          </span>
+        </span>
+        <span class="artist-go">{{ icon("chevron-right", size=16) }}</span>
+      </a>
+    </li>
+    {% endfor %}
+  </ul>
+
+  {% elif catalog_empty %}
+  <div class="panel">
+    {{ empty_state("music-2", "No artists yet",
+                   "Import an artist from Spotify to start building the pull pool.") }}
+  </div>
+
   {% else %}
-  <li class="muted">No artists found.</li>
-  {% endfor %}
-</ul>
+  <div class="panel">
+    {{ empty_state("search", "No artists match “" ~ q ~ "”",
+                   "Try a shorter search, or import the artist from Spotify above.") }}
+  </div>
+  {% endif %}
+</section>
+
 {% endblock %}
