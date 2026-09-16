@@ -14,7 +14,7 @@ from utils.errors import report_unhandled
 from utils.vinyl import vinyl_gif_art_from_url, vinyl_gif_sig_art_from_url, vinyl_static_bytes
 import logging
 from utils.command_types import slash_only
-from utils.aesthetics import named_emoji
+from utils.aesthetics import named_emoji, card_emoji
 
 log = logging.getLogger("grails.xp")
 
@@ -463,19 +463,22 @@ class XPCog(commands.Cog):
                 vinyl_static_bytes, image_url, output_size=500, rarity=rarity)
             media_name = "spinning_vinyl.png"
 
+        emoji = card_emoji(rarity, variant="sig_vinyl" if is_sig else "vinyl")  # Preload the emoji for faster rendering
         if is_sig:
-            title = f"🖋️ {ctx.author.display_name} Received {'a ' if guaranteed_sig else ''}Signature Vinyl!"
+            title = f"{named_emoji('sig_vinyl')} {ctx.author.display_name} received a Signature Vinyl!"
         else:
-            title = f"💽 {ctx.author.display_name} Received Vinyl!"
+            title = f"{named_emoji('vinyl')} {ctx.author.display_name} received a Vinyl!"
         embed = discord.Embed(title=title, color=discord.Color.from_rgb(139, 69, 19))
-        embed.add_field(name="You received:", value=f"**{song}** - {artist}\n from *{album[1]}*")
 
-        if guaranteed_sig:
-            embed.add_field(name="🖋️ Remaining Signature Vinyl Pulls",
-                            value=f"{get_sig_vinyl_count(ctx.author.id)} pulls left", inline=True)
-        else:
-            embed.add_field(name="💽 Remaining Vinyl Pulls",
-                            value=f"{get_vinyl_count(ctx.author.id)} pulls left", inline=True)
+
+        # The song goes in the field *value*: Discord does not render markdown
+        # in a field name, so the asterisks showed through literally.
+        owned = get_sig_vinyl_count(ctx.author.id) if guaranteed_sig else get_vinyl_count(ctx.author.id)
+        remaining = named_emoji('sig_vinyl') if guaranteed_sig else named_emoji('vinyl')
+        embed.add_field(
+            name=f"{emoji} **{song}** by **{artist}** from *{album[1]}*\n",
+            value=f"Owned: {owned} {remaining}",
+            inline=False)
 
         embed.set_image(url=f"attachment://{media_name}")
         file = discord.File(media_buf, filename=media_name, spoiler=False)
@@ -542,16 +545,11 @@ class XPCog(commands.Cog):
         # Create success embed
         embed = discord.Embed(
             title="🎁 Vinyl Pulls Granted!",
-            description=f"**{user.display_name}** received **{amount}** vinyl pull{'s' if amount > 1 else ''}!",
+            description=f"**{user.display_name}** received +**{amount}** {named_emoji('vinyl')}{'s' if amount > 1 else ''}!\n \
+            Owned: {total_vinyl_count} {named_emoji('vinyl')}",
             color=discord.Color.green()
         )
-        
-        embed.add_field(
-            name="💽 Total Vinyl Pulls",
-            value=f"{total_vinyl_count} available",
-            inline=True
-        )
-        
+              
         embed.set_thumbnail(url=user.display_avatar.url)
         embed.set_footer(text="Use .vinyl to claim vinyl songs!")
         
@@ -561,13 +559,9 @@ class XPCog(commands.Cog):
         try:
             dm_embed = discord.Embed(
                 title="🎁 You received vinyl pulls!",
-                description=f"A bot admin granted you **{amount}** vinyl pull{'s' if amount > 1 else ''}!",
+                description=f"A bot admin granted you **{amount}** {named_emoji('vinyl')} ! \n \
+                            Owned: {total_vinyl_count} {named_emoji('vinyl')}",
                 color=discord.Color.green()
-            )
-            dm_embed.add_field(
-                name="💽 Total Available",
-                value=f"{total_vinyl_count} vinyl pulls",
-                inline=True
             )
             dm_embed.set_footer(text="Use .vinyl in the server to claim your songs!")
             await user.send(embed=dm_embed)
@@ -611,19 +605,14 @@ class XPCog(commands.Cog):
         add_sig_vinyl_count(user.id, amount)
         
         # Get updated vinyl count
-        total_vinyl_count = get_sig_vinyl_count(user.id)
+        total_sig_vinyl_count = get_sig_vinyl_count(user.id)
 
         # Create success embed
         embed = discord.Embed(
             title="🎁 Signature Vinyl Pulls Granted!",
-            description=f"**{user.display_name}** received **{amount}** signature vinyl pull{'s' if amount > 1 else ''}!",
+            description=f"**{user.display_name}** received +**{amount}** {named_emoji('sig_vinyl')}{'s' if amount > 1 else ''}!\n \
+            Owned: {total_sig_vinyl_count} {named_emoji('sig_vinyl')}",
             color=discord.Color.green()
-        )
-        
-        embed.add_field(
-            name="🖋️ Total Signature Vinyl Pulls",
-            value=f"{total_vinyl_count} available",
-            inline=True
         )
         
         embed.set_thumbnail(url=user.display_avatar.url)
@@ -635,15 +624,11 @@ class XPCog(commands.Cog):
         try:
             dm_embed = discord.Embed(
                 title="🎁 You received signature vinyl pulls!",
-                description=f"A bot admin granted you **{amount}** signature vinyl pull{'s' if amount > 1 else ''}!",
+                description=f"A bot admin granted you **{amount}** {named_emoji('sig_vinyl')}{'s' if amount > 1 else ''}!\n \
+                            Owned: {total_sig_vinyl_count} {named_emoji('sig_vinyl')}",
                 color=discord.Color.green()
             )
-            dm_embed.add_field(
-                name="🖋️ Total Available",
-                value=f"{total_vinyl_count} signature vinyl pulls",
-                inline=True
-            )
-            dm_embed.set_footer(text="Use .sigvinyl in the server to claim your songs!")
+            dm_embed.set_footer(text="Use .sv in the server to claim your songs!")
             await user.send(embed=dm_embed)
         except discord.HTTPException:
             # If DM fails (e.g. DMs closed), that's okay - the channel message was sent

@@ -32,7 +32,7 @@ async def _card_autocomplete(interaction: discord.Interaction, current: str):
         return []
     return [
         app_commands.Choice(
-            name=f"{c['song_name']} — {c['artist']} ({c['rarity']})"[:100],
+            name=f"{c['song_name']} by {c['artist']} ({c['rarity']})"[:100],
             value=str(c["collection_id"]),
         )
         for c in cards
@@ -99,7 +99,7 @@ class ViewCog(commands.Cog):
             return matches[0], None
 
         listing = "\n".join(
-            f"`{m['collection_id']}` **{m['song_name']}** — {m['artist']} ({m['rarity']})"
+            f"`{m['collection_id']}` **{m['song_name']}** by **{m['artist']}** ({m['rarity']})"
             for m in matches[:10]
         )
         return None, (f"Several cards match **{item}** — run `.view <id>` with one of these:\n{listing}")

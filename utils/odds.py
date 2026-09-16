@@ -25,8 +25,8 @@ SONGS_PER_PULL = 3
 # "Per pull" means: the chance that a single .c shows at least one song of this
 # variant. draw_variant() converts each to a per-song probability.
 
-# MYTHIC_PER_PULL = 1        # testing only: every pull is a mythic
-MYTHIC_PER_PULL = 0.005      # 0.5%
+MYTHIC_PER_PULL = 1        # testing only: every pull is a mythic
+# MYTHIC_PER_PULL = 0.005      # 0.5%
 GUTSCOOKIE_PER_PULL = 0.02   # 2%
 SKETCH_PER_PULL = 0.03       # 3%
 GLITCHED_PER_PULL = 0.12     # 12%

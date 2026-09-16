@@ -89,7 +89,8 @@ async def get_filtered_albums(included, artist_name, ctx, token):
     # Step 3: Send the album names
     if not all_albums:
         if ctx:
-            await ctx.send(f"💿 No albums found for **{artist_name_corrected}**.")
+            await ctx.send(f"{aesthetics.named_emoji('vinyl')} No albums found for "
+                           f"**{artist_name_corrected}**.")
         return [], artist_name_corrected, artist_id
 
     filtered_words = ["live", "mix", "karaoke", "playlist"]

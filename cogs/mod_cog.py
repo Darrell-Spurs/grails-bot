@@ -1,9 +1,17 @@
-from db import list_latest, remove_latest, add_user_xp, user_exists
+import asyncio
+import logging
+import os
+
+from db import list_latest, remove_latest, add_user_xp, user_exists, get_all_artists
 import discord
 from discord.ext import commands
 from math import ceil
 
 from utils import aesthetics
+from utils.errors import report_unhandled
+from utils.vinyl import find_signature, signature_filename, signature_files
+
+log = logging.getLogger("grails.mod")
 
 class ModCog(commands.Cog):
     def __init__(self, bot):
@@ -40,8 +48,10 @@ class ModCog(commands.Cog):
             for song in songs_on_page:
                 _, song_name, artist, variant, album_name, collected_at = song[:6]
                 embed.add_field(
-                    name=f"{song_name} - {artist}",
-                    value=f"{variant} @ {collected_at}",
+                # Song in the value, not the name: field names do not render
+                # markdown, so bold there would print literal asterisks.
+                    name=f"{variant} @ {collected_at}",
+                    value=f"**{song_name}** by **{artist}** from *{album_name}*",
                     inline=False
                 )
 
@@ -108,6 +118,76 @@ class ModCog(commands.Cog):
             embed.add_field(name="Sample", value=sample or "​", inline=False)
         await ctx.send(embed=embed)
 
+    @commands.command(aliases=['sc'])
+    @commands.has_role("grails-admin")
+    async def sigcheck(self, ctx):
+        """Check which artists are missing signature art.
+
+        A signature vinyl is only reachable if utils/images/sigs holds a file
+        named for the artist, so an artist added to the catalogue without one
+        will fail the moment somebody rolls a signature on them. This lists the
+        gap before a player finds it.
+
+        Resolution goes through utils.vinyl.find_signature -- the same function
+        the pull uses -- so this check cannot report a file the pull would then
+        fail to open.
+        """
+        artists = await asyncio.to_thread(get_all_artists)
+        files = signature_files()
+
+        have, missing = [], []
+        matched = set()
+        for artist in sorted(artists, key=str.lower):
+            found = find_signature(artist)
+            if found:
+                have.append(artist)
+                matched.add(os.path.basename(found))
+            else:
+                missing.append(artist)
+
+        # Art with nobody to attach it to: usually an artist that was renamed or
+        # removed from the catalogue, leaving the file behind.
+        orphans = [f for f in files if f not in matched]
+
+        embed = discord.Embed(
+            title="Signature art coverage",
+            description=f"**{len(have)} / {len(artists)}** artists have signature art."
+                        + (f"  ·  {len(orphans)} unused file"
+                           f"{'' if len(orphans) == 1 else 's'}" if orphans else ""),
+            colour=discord.Colour.green() if not missing else discord.Colour.orange(),
+        )
+
+        if missing:
+            self._fill_field(embed, "Missing", [f"`{a}`" for a in missing],
+                             hint=f"expected e.g. `{signature_filename(missing[0])}`")
+        if orphans:
+            self._fill_field(embed, "Unused files", [f"`{f}`" for f in orphans])
+        if have and not missing:
+            embed.add_field(name="All covered",
+                            value=" ".join(f"`{a}`" for a in have)[:1024], inline=False)
+
+        embed.set_footer(text=f"{len(files)} file(s) in utils/images/sigs")
+        await ctx.send(embed=embed)
+
+    @staticmethod
+    def _fill_field(embed, name, items, hint=""):
+        """Add `items` to `embed`, splitting at Discord's 1024-char field cap."""
+        chunk, first = "", True
+        for item in items:
+            if len(chunk) + len(item) + 1 > 1000:
+                embed.add_field(name=name if first else "\u200b", value=chunk, inline=False)
+                chunk, first = "", False
+            chunk += item + " "
+        if chunk:
+            embed.add_field(name=name if first else "\u200b",
+                            value=chunk + (f"\n{hint}" if hint else ""), inline=False)
+
+    @sigcheck.error
+    async def sigcheck_error(self, ctx, error):
+        if isinstance(error, commands.MissingRole):
+            await ctx.send("You need the **grails-admin** role to use that.")
+            return
+        await report_unhandled(log, ctx, error, command="sigcheck")
 
 async def setup(bot):
     await bot.add_cog(ModCog(bot))

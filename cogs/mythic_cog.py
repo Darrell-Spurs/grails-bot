@@ -96,7 +96,7 @@ class MythicCog(commands.Cog):
         filled = "●" * claimed + "○" * max(cap - claimed, 0)
 
         embed = discord.Embed(
-            title=f"💎 {song_name}",
+            title=f"{aesthetics.card_emoji(rarity, 'mythic')} {song_name}",
             description=f"{artist_name}" + (f" · _{album_name}_" if album_name else ""),
             colour=discord.Colour(aesthetics.rarity_colour_int(rarity)),
         )
@@ -112,8 +112,6 @@ class MythicCog(commands.Cog):
         if mine:
             embed.add_field(name="You", value=f"You hold copy **#{mine}**", inline=False)
 
-        embed.add_field(name="Rarity",
-                        value=f"{aesthetics.rarity_dot(rarity)} {rarity}", inline=True)
         if album_image:
             embed.set_thumbnail(url=album_image)
         embed.set_footer(text="Mythics are capped server-wide — once they are gone, they are gone.")

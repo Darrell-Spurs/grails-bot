@@ -2,6 +2,7 @@
 import io
 import math
 import os
+import unicodedata
 from urllib import response
 import requests
 import numpy as np
@@ -14,6 +15,49 @@ from utils import aesthetics
 SIGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "images", "sigs")
 
 SCALE = 2
+def signature_filename(artist: str) -> str:
+    """The file `artist`'s signature vinyl looks for."""
+    return f"{artist.replace(' ', '_')}_sig.png"
+
+
+def find_signature(artist: str):
+    """Locate an artist's signature file, or None.
+
+    Exact match first, which is the normal case. The fallbacks matter because
+    the names carry accents: "ROSE" and "Renee Rapp" can be stored either as a
+    precomposed character (NFC, what Windows writes) or as a letter plus a
+    combining accent (NFD, what macOS writes). The two are different byte
+    strings, so a signature uploaded from a Mac would silently never be found.
+    Comparing normalised forms makes the lookup agnostic to which was used.
+
+    The final pass is case-insensitive, so "the weeknd_sig.png" still resolves.
+    """
+    wanted = signature_filename(artist)
+    direct = os.path.join(SIGS_DIR, wanted)
+    if os.path.exists(direct):
+        return direct
+    if not os.path.isdir(SIGS_DIR):
+        return None
+
+    target = unicodedata.normalize("NFC", wanted)
+    entries = os.listdir(SIGS_DIR)
+    for name in entries:
+        if unicodedata.normalize("NFC", name) == target:
+            return os.path.join(SIGS_DIR, name)
+    lowered = target.lower()
+    for name in entries:
+        if unicodedata.normalize("NFC", name).lower() == lowered:
+            return os.path.join(SIGS_DIR, name)
+    return None
+
+
+def signature_files():
+    """Every signature file present, as a sorted list of bare filenames."""
+    if not os.path.isdir(SIGS_DIR):
+        return []
+    return sorted(f for f in os.listdir(SIGS_DIR) if f.lower().endswith("_sig.png"))
+
+
 def _download_image(url: str, timeout: int = 15) -> Image.Image:
     response = requests.get(url)
     img = Image.open(BytesIO(response.content)).convert("RGB").resize((300 * SCALE, 300 * SCALE))
@@ -347,7 +391,11 @@ def vinyl_gif_sig_art_from_url(
 
     Returns a BytesIO (GIF) when return_bytes=True, else None (writes to output_path).
     """
-    signature_path = os.path.join(SIGS_DIR, f"{artist.replace(' ', '_')}_sig.png")
+    signature_path = find_signature(artist)
+    if signature_path is None:
+        raise FileNotFoundError(
+            f"No signature art for {artist!r} -- expected "
+            f"{signature_filename(artist)} in {SIGS_DIR}")
 
     if output_path is None and not return_bytes:
         raise ValueError("output_path or return_bytes is required for GIF generation")

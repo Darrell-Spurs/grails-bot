@@ -21,7 +21,6 @@ log = logging.getLogger("grails.trade")
 # These are collection *variants*, not song rarities -- the local name is kept
 # so the rest of this cog reads unchanged.
 RARITIES = VARIANTS
-rarity_emojis = VARIANT_EMOJI
 
 
 def _find_trade_item(user_id, rarity, item_input, artist=None):
@@ -80,7 +79,7 @@ async def _own_item_autocomplete(interaction: discord.Interaction, current: str)
     choices = []
     for row in items:
         _, _, _, song_name, artist_name, _, album_name = row
-        label = f"{song_name} - {artist_name} ({album_name})"
+        label = f"{song_name} by {artist_name} from {album_name}"
         if cur in label.lower():
             choices.append(app_commands.Choice(name=label[:100], value=str(row[0])))
     return choices[:25]
@@ -107,8 +106,9 @@ class TradeCog(commands.Cog):
         if rarity.lower() == "mythic":
             copy_number = get_user_mythic_copy_number(user_id, song_data[1])  # song_data[1] is song_id
             if copy_number:
-                return f"{glyph} **#{copy_number} {song_name}** - **{artist_name}**\n*{album_name}*"
-        return f"{glyph} **{song_name}** - **{artist_name}**\n*{album_name}*"
+                return (f"{glyph} **{song_name}** by **{artist_name}** from *{album_name}*"
+                        f"  ·  copy **#{copy_number}**")
+        return f"{glyph} **{song_name}** by **{artist_name}** from *{album_name}*"
 
     def _ambiguous_message(self, rarity, item, matches, artist=None):
         artist_note = f" by **{artist}**" if artist else ""

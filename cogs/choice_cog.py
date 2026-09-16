@@ -103,7 +103,9 @@ class ChooseSongView(discord.ui.View):
         # Create embed for the selection message
 
         embed = discord.Embed(
-            description=f"{glyph} **{interaction.user.display_name}** picked **{song_name}** by **{artist}** (+{int(added_xp)} XP)",
+            description=f"{glyph} **{interaction.user.display_name}** picked "
+                        f"**{song_name}** by **{artist}** from *{album[1]}* "
+                        f"(+{int(added_xp)} XP)",
             color=discord.Color(aesthetics.rarity_colour_int(rarity)),
         )
 
@@ -170,7 +172,9 @@ class MythicClaimView(discord.ui.View):
         button.style = discord.ButtonStyle.secondary
 
         await interaction.response.edit_message(view=self)
-        await interaction.followup.send(f"**{interaction.user.display_name}** claimed** {self.emoji} {self.song_name} #{copy_number}** by **{self.artist}**!")
+        await interaction.followup.send(
+            f"{self.emoji} **{interaction.user.display_name}** claimed "
+            f"**#{copy_number}** **{self.song_name}** by **{self.artist}**")
 
     async def on_timeout(self):
         # Disable button when view times out
@@ -255,7 +259,8 @@ class ChoiceCog(commands.Cog):
 
         if random.random() < odds.SOUR_PATCH_VINYL_SPLIT or xp_cog is None:
             add_vinyl_count(ctx.author.id, 1)
-            embed.description = f"**{ctx.author.display_name}** got a **free vinyl pull!** 💿"
+            embed.description = (f"**{ctx.author.display_name}** got a "
+                                 f"**free vinyl pull!** {aesthetics.named_emoji('vinyl')}")
             await ctx.send(embed=embed, file=file)
         else:
             user_xp = get_user_xp(ctx.author.id)
@@ -404,7 +409,8 @@ class ChoiceCog(commands.Cog):
         card_emoji = aesthetics.card_emoji(rarity, "mythic")
         embed = discord.Embed(
             title=f"{card_emoji} **{ctx.author.display_name} PULLED A MYTHIC**",
-            description=f"||**{song_name}**|| ||**#{next_copy_number}**|| by ||**{artist}**|| from ||*{album_name}*||\n\n",
+            description=f"||**#{next_copy_number}**|| ||**{song_name}**|| by ||**{artist}**|| from ||*{album_name}*||  ·  "
+                        f"\n\n",
             color=discord.Color.from_rgb(140, 202, 247)
         )
         claim_view = MythicClaimView(ctx, song_id, album_id, song_name, artist, rarity)
@@ -485,7 +491,8 @@ class ChoiceCog(commands.Cog):
 
         embed = discord.Embed(
             title="🎯 Mythic Hunt Set!",
-            description=f"The next mythic pull will be:\n**{song_name_corrected}** by **{artist}**\nfrom *{album_name_corrected}*",
+            description=f"The next mythic pull will be:\n"
+                        f"**{song_name_corrected}** by **{artist}** from *{album_name_corrected}*",
             color=discord.Color.gold()
         )
         embed.set_thumbnail(url=album_url)
@@ -500,7 +507,8 @@ class ChoiceCog(commands.Cog):
         old_hunt = get_mythic_hunt()
         if old_hunt:
             clear_mythic_hunt()
-            await ctx.send(f"🚫 Cleared mythic hunt: **{old_hunt['song_name']}** by **{old_hunt['artist']}**")
+            await ctx.send(f"🚫 Cleared mythic hunt: **{old_hunt['song_name']}** by "
+                           f"**{old_hunt['artist']}** from *{old_hunt['album_name']}*")
         else:
             await ctx.send("❌ No active mythic hunt to clear.")
 
@@ -512,7 +520,7 @@ class ChoiceCog(commands.Cog):
         if hunt:
             embed = discord.Embed(
                 title="🎯 Current Mythic Hunt",
-                description=f"**{hunt['song_name']}** by **{hunt['artist']}**\nfrom *{hunt['album_name']}*",
+                description=f"**{hunt['song_name']}** by **{hunt['artist']}** from *{hunt['album_name']}*",
                 color=discord.Color.gold()
             )
             embed.set_thumbnail(url=hunt['album_url'])
@@ -555,8 +563,7 @@ class ChoiceCog(commands.Cog):
 
         embed = discord.Embed(
             title="📊 Mythic Status",
-            description=f"**{song_name_corrected}** by **{artist}**\n"
-                       f"from *{album_name_corrected}*",
+            description=f"**{song_name_corrected}** by **{artist}** from *{album_name_corrected}*",
             color=discord.Color.from_rgb(140, 202, 247)
         )
 
@@ -632,8 +639,7 @@ class ChoiceCog(commands.Cog):
 
         embed = discord.Embed(
             title="🧪 Mythic Test Results",
-            description=f"**{song_name_corrected}** by **{artist}**\n"
-                       f"from *{album_name_corrected}*",
+            description=f"**{song_name_corrected}** by **{artist}** from *{album_name_corrected}*",
             color=discord.Color.blue()
         )
 

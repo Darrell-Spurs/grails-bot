@@ -129,9 +129,8 @@ class AssignCog(commands.Cog):
 
         embed.add_field(
             name="Details",
-            value=f"{song_name_db} - {artist_name}\n"
-                  f"Track {song_number} of *{album_name_db}*\n"
-                  f"assigned to rarity **{rarity}**",
+            value=f"**{song_name_db}** by **{artist_name}** from *{album_name_db}*\n"
+                  f"Track {song_number}  ·  assigned to rarity **{rarity}**",
             inline=False
         )
 

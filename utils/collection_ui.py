@@ -68,12 +68,6 @@ def build_card_embed(card, owner_name, copy_number=None, owners=None, pinned=Fal
     embed.set_author(name=f"{owner_name}'s card")
     embed.add_field(name="Artist", value=card["artist"] or "—", inline=True)
     embed.add_field(name="Album", value=card["album_name"] or "—", inline=True)
-    embed.add_field(
-        name="Variant",
-        value=VARIANT_LABEL.get(variant, variant),
-        inline=True,
-    )
-    embed.add_field(name="Rarity", value=f"{_dot(rarity)} {rarity}", inline=True)
 
     if owners is not None:
         embed.add_field(
@@ -118,7 +112,7 @@ def _card_line(index, card):
     if variant == "mythic" and card.get("copy_number"):
         copy_tag = f" #{card['copy_number']}"
     return (f"`{index:>2}` {card_emoji(rarity, variant)} "
-            f"**{card['song_name']}**{copy_tag} — {card['artist']}")
+            f"**{card['song_name']}** by **{card['artist']}**{copy_tag}")
 
 
 def build_collection_embed(cards, page, pages, total, owner_name, *, variant=None,
@@ -321,9 +315,9 @@ class CollectionView(_OwnerView):
         opener = self.open_card
         opener.options = [
             discord.SelectOption(
-                label=f"{c['song_name']} — {c['artist']}"[:100],
+                label=f"{c['song_name']} by {c['artist']}"[:100],
                 description=f"{c['rarity']} · {VARIANT_LABEL.get((c['variant'] or 'default').lower(), c['variant'])}"[:100],
-                emoji=safe_option_emoji(_dot(c["rarity"])),
+                emoji=safe_option_emoji(card_emoji(c["rarity"], c["variant"])),
                 value=str(c["collection_id"]),
             )
             for c in self.current

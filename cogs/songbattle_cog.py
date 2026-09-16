@@ -400,7 +400,8 @@ class SongBattleCog(commands.Cog):
 
         if len(winner_indices) == 1:
             winner = slots[winner_indices[0]]
-            header = f"🏅 {winner['name']} won the round with {winner['song']} by {winner['artist']}!!"
+            header = (f"🏅 {winner['name']} won the round with "
+                      f"**{winner['song']}** by **{winner['artist']}**!!")
         elif len(winner_indices) > 1:
             names = ", ".join(slots[i]['name'] for i in winner_indices)
             header = f"🤝 The round was tied between {names}!"
