@@ -3,6 +3,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Claude Code
+.agents/
+.claude/
+
 # C extensions
 *.so
 
