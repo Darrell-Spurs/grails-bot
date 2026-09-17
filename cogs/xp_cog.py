@@ -123,9 +123,7 @@ class XPCog(commands.Cog):
             if user:
                 embed = discord.Embed(
                     title="🎉 LEVEL UP!",
-                    description=f"**{user.display_name}** reached **Level {current_level}**!\n \
-                    {level_up_note}\n \
-                    {remaining_note}",
+                    description=f"**{user.display_name}** reached **Level {current_level}**!\n {level_up_note}\n {remaining_note}",
                     color=discord.Color.gold()
                 )
 
@@ -133,7 +131,7 @@ class XPCog(commands.Cog):
                 total_sig_vinyl_count = get_sig_vinyl_count(user_id)
 
                 embed.set_thumbnail(url=user.display_avatar.url)
-                embed.set_footer(text=f"Use .v and .sv to open your vinyl")
+                embed.set_footer(text=f"Use .v and .sv to open your vinyls")
 
                 await channel.send(embed=embed)
             else:

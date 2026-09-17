@@ -49,11 +49,12 @@ def build_status_embed(user, status):
     embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
 
     if full:
-        embed.add_field(
-            name="Full",
-            value="You are at the cap — drops stop accruing until you spend some.",
-            inline=False,
-        )
+        embed.add_field(name="Next drop",
+                        value=f"**Fully Changed**",
+                        inline=True)
+        embed.add_field(name="Full again",
+                        value=f"in **0s**",
+                        inline=True)
     else:
         embed.add_field(name="Next drop",
                         value=f"in **{economy.format_duration(status['next_in'])}**",
@@ -63,7 +64,7 @@ def build_status_embed(user, status):
                         inline=True)
 
     embed.set_footer(text=f"One drop every {economy.PULL_REGEN_SECONDS // 60} minutes, "
-                          f"up to {economy.PULL_CAP}.  ·  spend them with .c")
+                          f"up to {economy.PULL_CAP}. Spend them with .c")
     return embed
 
 
