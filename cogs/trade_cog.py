@@ -14,7 +14,7 @@ from discord.ext import commands
 from db import (add_song_to_collection, get_user_song_by_details, remove_from_collection,
                 get_user_mythic_copy_number, get_user_tradeable_items, get_collection_item_by_id)
 from utils.command_types import slash_only
-from utils.aesthetics import VARIANTS, VARIANT_EMOJI, card_emoji
+from utils.aesthetics import VARIANTS, card_emoji
 
 log = logging.getLogger("grails.trade")
 

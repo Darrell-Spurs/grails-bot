@@ -39,6 +39,11 @@ bot = commands.Bot(command_prefix='.', intents=intents, help_command=None)
 async def on_ready():
     event(log, "startup", "logged in as %s", bot.user)
     _load_card_emojis()
+    # Last line of startup: cogs are loaded by setup_hook, the gateway is up and
+    # the emoji registry is filled, so this is the first moment a command typed
+    # in the server will actually work. on_ready fires again on every reconnect,
+    # so it is announced each time rather than only once.
+    event(log, "bot ready", "commands are ready to use")
 
 
 def _guild_card_emojis():

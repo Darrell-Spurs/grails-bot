@@ -35,14 +35,14 @@ class RegisterCog(commands.Cog):
             gift = 0
 
         embed = discord.Embed(
-            title="Welcome to Grails 🌟",
+            title=f"Welcome to Grails {aesthetics.named_emoji('vinyl')}",
             description=f"Registered as **{ctx.author.display_name}** — you can start "
                         f"collecting **XP** right away.",
             colour=aesthetics.ACCENT_COLOR_INT,
         )
         if gift:
             embed.add_field(
-                name="🎁 Welcome gift",
+                name="Welcome gift 🎁",
                 value=f"**1 signature vinyl** {aesthetics.named_emoji('sig_vinyl')} is waiting for you — open it with `.sv`.",
                 inline=False,
             )

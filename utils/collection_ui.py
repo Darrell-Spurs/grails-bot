@@ -25,9 +25,9 @@ log = logging.getLogger("grails.ui")
 # ---------------------------------------------------------------------------
 
 from utils.aesthetics import (  # noqa: F401
-    ACCENT_COLOR, RARITY_COLOR, RARITY_DOT, RARITY_EMOJI, RARITY_ORDER, UNASSIGNED,
-    TEXT_PRESENTATION_BASES, VARIANT_COLOR, VARIANT_EMOJI, VARIANT_LABEL, VARIANTS,
-    card_emoji, rarity_rank, safe_option_emoji, variant_rank,
+    ACCENT_COLOR, RARITY_COLOR, RARITY_DOT, RARITY_ORDER, UNASSIGNED,
+    TEXT_PRESENTATION_BASES, VARIANT_COLOR, VARIANT_LABEL, VARIANTS,
+    card_emoji, rarity_rank, safe_option_emoji, variant_emoji, variant_rank,
 )
 
 SORTS = {
@@ -371,7 +371,7 @@ class CollectionView(_OwnerView):
         placeholder="Filter by variant…", row=2,
         options=[discord.SelectOption(label="All variants", value="all")] + [
             discord.SelectOption(label=VARIANT_LABEL[v], value=v,
-                                 emoji=safe_option_emoji(VARIANT_EMOJI[v]))
+                                 emoji=safe_option_emoji(variant_emoji(v)))
             for v in VARIANTS
         ],
     )

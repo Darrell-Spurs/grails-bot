@@ -35,7 +35,6 @@ UNASSIGNED = "unassigned"
 UNASSIGNED_LABEL = "unassigned"
 UNASSIGNED_COLOR = "#8b93a1"        # neutral grey, unmistakably not a tier
 UNASSIGNED_DOT = "⬜"           # white large square
-UNASSIGNED_EMOJI = "❓"         # question mark
 
 RARITY_COLOR = {
     "ultimate":  "#ffeb83",
@@ -45,9 +44,9 @@ RARITY_COLOR = {
     "basic":     "#9ae1ff",
 }
 
-# Two emoji sets, because they answer different questions.
-#   RARITY_DOT   -- a colour chip for dense lists, where the hue is the signal.
-#   RARITY_EMOJI -- a thematic icon for headings, where the tier is the subject.
+# One glyph per tier, used everywhere a rarity is shown on its own. There used
+# to be a second thematic set for headings; two vocabularies for one idea meant
+# the same tier looked different depending on which surface you were on.
 RARITY_DOT = {
     "ultimate":  "\U0001F7E1",  # yellow circle
     "legendary": "\U0001F7E0",  # orange circle
@@ -56,13 +55,6 @@ RARITY_DOT = {
     "basic":     "\U0001F535",  # blue circle
 }
 
-RARITY_EMOJI = {
-    "ultimate":  "\U0001FA90",  # ringed planet
-    "legendary": "\U0001F3C6",  # trophy
-    "elite":     "⭐",      # star
-    "unique":    "\U0001F52E",  # crystal ball
-    "basic":     "\U0001F4C4",  # page
-}
 
 # ---------------------------------------------------------------------------
 # Collection variant
@@ -76,19 +68,6 @@ VARIANT_LABEL = {
     "sketch": "Sketch", "glitched": "Glitched", "default": "Standard",
 }
 
-# Discord validates select-option emoji against Unicode's RGI sequence list.
-# U+FE0F belongs in a sequence only for characters whose Emoji_Presentation is
-# No -- the pencil and the ballpoint pen below. Appending it to a character that
-# is already emoji-presentation yields a non-RGI sequence, and Discord rejects
-# the whole message with 50035 "Invalid emoji".
-VARIANT_EMOJI = {
-    "mythic":    "\U0001F48E",        # gem
-    "sig_vinyl": "\U0001F58B️",  # ballpoint pen (text-presentation, VS16 required)
-    "vinyl":     "\U0001F4BF",        # optical disc
-    "sketch":    "✏️",      # pencil (text-presentation, VS16 required)
-    "glitched":  "\U0001F9E9",        # puzzle piece
-    "default":   "⚪",            # white circle -- must NOT carry VS16
-}
 
 VARIANT_COLOR = {
     "mythic":    "#22d3ee",
@@ -169,11 +148,18 @@ def rarity_dot(rarity):
 
 
 def rarity_emoji(rarity):
-    return RARITY_EMOJI.get(_warned(rarity), UNASSIGNED_EMOJI)
+    """Alias of rarity_dot(): one glyph per tier, everywhere."""
+    return rarity_dot(rarity)
 
 
 def variant_emoji(variant):
-    return VARIANT_EMOJI.get(_key(variant, "default"), "\U0001F3B5")
+    """The guild emoji for a variant on its own, or "" if it is not uploaded.
+
+    There is deliberately no unicode stand-in: a wrong-but-present glyph reads
+    as intentional, while an empty one is visibly a missing upload.
+    """
+    v = _key(variant, "default")
+    return named_emoji(VARIANT_EMOJI_NAME.get(v, v), default="")
 
 
 def is_rarity(value):
@@ -228,6 +214,17 @@ VARIANT_EMOJI_SUFFIX = {
     "sketch": "sketch",
     "glitched": "glitch",
     "default": "",          # the standard variant uses the bare rarity name
+}
+
+# The guild emoji for a variant shown on its own (the filter menu), as opposed
+# to the rarity x variant card glyphs above.
+VARIANT_EMOJI_NAME = {
+    "mythic": "mythic",
+    "sig_vinyl": "sig_vinyl",
+    "vinyl": "vinyl",
+    "sketch": "sketch",
+    "glitched": "glitch",
+    "default": "default",
 }
 
 _card_emojis = {}
@@ -315,10 +312,9 @@ def card_emoji(rarity, variant="default"):
             found = _card_emojis.get(name.lower())
             if found:
                 return str(found)
-    # Fallback: the variant glyph carries more information than the rarity dot
-    # when it is not the plain default.
-    v = _key(variant, "default")
-    return rarity_dot(rarity) if v == "default" else variant_emoji(v)
+    # Last resort is the rarity dot: variant glyphs are guild uploads now and
+    # may be absent, while the dot is always present.
+    return rarity_dot(rarity)
 
 
 # ---------------------------------------------------------------------------
@@ -333,12 +329,10 @@ def card_emoji(rarity, variant="default"):
 # to change.
 # ---------------------------------------------------------------------------
 
-NAMED_EMOJI_FALLBACK = {
-    "vinyl": "💿",       # optical disc
-    "sig_vinyl": "🖋️",  # ballpoint pen
-    "cookie": "🍪",
-    "sourpatch": "🍬",
-}
+# Names the bot asks the guild for. No unicode stand-ins: an emoji that is not
+# uploaded renders as nothing, which is visibly a gap rather than a glyph that
+# looks deliberate. `.emojicheck` lists what is missing.
+NAMED_EMOJI = {"vinyl", "sig_vinyl", "cookie", "sourpatch"} | set(VARIANT_EMOJI_NAME.values())
 
 _named_emojis = {}
 
@@ -349,18 +343,13 @@ def set_named_emojis(mapping):
     _named_emojis = {str(k).lower(): v for k, v in (mapping or {}).items()}
 
 
-def named_emoji(name, default=None):
-    """The guild emoji called `name`, or its unicode stand-in.
+def named_emoji(name, default=""):
+    """The guild emoji called `name`, or `default` when it is not uploaded.
 
-    Safe to call before the bot is ready -- it simply returns the fallback.
+    Safe to call before the bot is ready -- it simply returns `default`.
     """
-    key = (name or "").lower()
-    found = _named_emojis.get(key)
-    if found:
-        return str(found)
-    if default is not None:
-        return default
-    return NAMED_EMOJI_FALLBACK.get(key, "")
+    found = _named_emojis.get((name or "").lower())
+    return str(found) if found else default
 
 
 def wanted_emoji_names():
@@ -373,7 +362,7 @@ def wanted_emoji_names():
              for r in RARITY_ORDER
              for v in VARIANTS
              for n in card_emoji_names(r, v)}
-    names.update(NAMED_EMOJI_FALLBACK)
+    names.update(NAMED_EMOJI)
     return names
 
 

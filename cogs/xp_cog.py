@@ -3,15 +3,15 @@ from discord import app_commands
 from discord.ext import commands
 import random, math, asyncio
 from db import (get_user_xp, add_user_xp, user_exists, get_all_artists,
-                can_claim_daily, update_daily_claim, get_song_rarity, add_song_to_collection,
-                get_user_song_by_details, add_vinyl_count, get_vinyl_count, use_vinyl_pull,
+                can_claim_daily, update_daily_claim, add_song_to_collection,
+                add_vinyl_count, get_vinyl_count, use_vinyl_pull,
                 get_sig_vinyl_count, use_sig_vinyl_pull, add_sig_vinyl_count,
                 get_top_users_by_xp, get_user_xp_rank)
-from utils.helpers import (get_random_song, get_random_album, pick_unique_song,
+from utils.helpers import (pick_unique_song,
                            SOURPATCH_ID, SOURPATCH_IMAGE)
 from utils import aesthetics, odds
 from utils.errors import report_unhandled
-from utils.vinyl import vinyl_gif_art_from_url, vinyl_gif_sig_art_from_url, vinyl_static_bytes
+from utils.vinyl import vinyl_gif_sig_art_from_url, vinyl_static_bytes
 import logging
 from utils.command_types import slash_only
 from utils.aesthetics import named_emoji, card_emoji
@@ -65,6 +65,29 @@ class XPCog(commands.Cog):
         current_level = self.get_level_from_xp(current_xp)
         xp_for_next_level = self.get_xp_for_level(current_level + 1)
         return xp_for_next_level - current_xp
+
+    def xp_progress_text(self, current_xp):
+        """The level, the bar and the gap to the next level, as embed text.
+
+        Returned as a description rather than a field: a field always renders
+        its name on a line of its own, and even an invisible name leaves that
+        gap behind. A description sits straight under the author line.
+
+        Level 0 is included deliberately. This used to be skipped entirely,
+        so a brand-new player opened /xp to an empty embed -- yet "Level 0,
+        500 XP to go" is exactly what they came to see.
+        """
+        level = self.get_level_from_xp(current_xp)
+        floor = self.get_xp_for_level(level)
+        ceiling = self.get_xp_for_level(level + 1)
+        span = max(ceiling - floor, 1)
+        into = current_xp - floor
+
+        bar_length = 20
+        filled = int(into / span * bar_length)
+        bar = "█" * filled + "░" * (bar_length - filled)
+        return (f"**Level {level}**\n\n`{bar}` {into:,}/{span:,} XP\n\n"
+                f"`{ceiling - current_xp:,}` XP needed to the next level")
 
     def get_level_rewards(self, level):
         """Get reward description for a specific level"""
@@ -159,40 +182,14 @@ class XPCog(commands.Cog):
 
         current_xp = get_user_xp(target_user.id)
         current_level = self.get_level_from_xp(current_xp)
-        xp_to_next = self.get_xp_to_next_level(current_xp)
 
         embed = discord.Embed(
-            title=f"🌟 XP Stats for {target_user.display_name}",
-            color=discord.Color.gold())
+            color=discord.Color.gold(),
+            description=self.xp_progress_text(current_xp),
+        )
 
-        embed.add_field(name="🧬 Current XP",
-                        value=f"`{current_xp:,}` XP",
-                        inline=True)
-        embed.add_field(name="📊 Current Level",
-                        value=f"Level `{current_level}`",
-                        inline=True)
-        embed.add_field(name="🔬 XP to Next Level",
-                        value=f"`{xp_to_next:,}` XP needed",
-                        inline=True)
-
-        # Progress bar
-        if current_level > 0:
-            # xp_floor = int(current_level ** 2 * self.multiplier / 2)
-            xp_for_next = self.get_xp_for_level(current_level + 1)
-            xp_floor = self.get_xp_for_level(current_level)
-            current_xp = get_user_xp(target_user.id)
-            xp_in_current_level = current_xp - xp_floor
-
-            progress = xp_in_current_level / (xp_for_next - xp_floor)
-            bar_length = 20
-            filled = int(progress * bar_length)
-            bar = "█" * filled + "░" * (bar_length - filled)
-            embed.add_field(name="📈 Level Progress",
-                            value=f"`{bar}` {xp_in_current_level}/{xp_for_next - xp_floor} XP",
-                            inline=False)
-
-        embed.set_thumbnail(url=target_user.display_avatar.url)
-        embed.set_footer(text="Keep collecting music to earn more XP!")
+        embed.set_author(name=target_user.display_name, icon_url=target_user.display_avatar.url)
+        embed.set_footer(text="Use /xphelp to learn more about how to get XP!")
 
         await ctx.send(embed=embed)
 
