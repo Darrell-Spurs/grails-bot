@@ -543,8 +543,7 @@ class XPCog(commands.Cog):
         # Create success embed
         embed = discord.Embed(
             title="🎁 Vinyl Pulls Granted!",
-            description=f"**{user.display_name}** received +**{amount}** {named_emoji('vinyl')}{'s' if amount > 1 else ''}!\n \
-            Owned: {total_vinyl_count} {named_emoji('vinyl')}",
+            description=f"**{user.display_name}** received +**{amount}** {named_emoji('vinyl')}{'s' if amount > 1 else ''}!\nOwned: {total_vinyl_count} {named_emoji('vinyl')}",
             color=discord.Color.green()
         )
               
@@ -608,8 +607,7 @@ class XPCog(commands.Cog):
         # Create success embed
         embed = discord.Embed(
             title="🎁 Signature Vinyl Pulls Granted!",
-            description=f"**{user.display_name}** received +**{amount}** {named_emoji('sig_vinyl')}{'s' if amount > 1 else ''}!\n \
-            Owned: {total_sig_vinyl_count} {named_emoji('sig_vinyl')}",
+            description=f"**{user.display_name}** received +**{amount}** {named_emoji('sig_vinyl')}{'s' if amount > 1 else ''}!\nOwned: {total_sig_vinyl_count} {named_emoji('sig_vinyl')}",
             color=discord.Color.green()
         )
         

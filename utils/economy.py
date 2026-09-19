@@ -10,6 +10,8 @@ discord, no I/O. The rules are the part worth testing, and they are testable
 without either.
 """
 import datetime
+import math
+import time
 
 # ---------------------------------------------------------------------------
 # Tunables
@@ -103,6 +105,20 @@ def seconds_to_full(charges, anchor, now=None):
 # ---------------------------------------------------------------------------
 # Presentation
 # ---------------------------------------------------------------------------
+
+def discord_countdown(seconds, style="R"):
+    """A Discord timestamp that counts down live in every viewer's client.
+
+    Renders as "in 2 minutes" and ticks on its own, so a status message stays
+    accurate without being edited. The trade-off is precision: Discord picks the
+    unit ("in 20 seconds", "in 3 minutes"), so it cannot show "1m 20s".
+
+    Only renders in message content, embed descriptions and field values -- not
+    in titles, field names or footers, where it prints the raw <t:...> tag.
+    """
+    moment = int(time.time() + math.ceil(max(seconds, 0)))
+    return f"<t:{moment}:{style}>"
+
 
 def format_duration(seconds):
     """'1m 12s' / '18m' / '2h 05m'. Short enough to sit inline in an embed."""

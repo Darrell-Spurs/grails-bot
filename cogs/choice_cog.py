@@ -304,10 +304,10 @@ class ChoiceCog(commands.Cog):
 
     def _no_charges_embed(self, ctx, status):
         """Shown when the stack is empty -- with the wait, not just a refusal."""
-        wait = economy.format_duration(status["next_in"]) if status else "a few minutes"
+        wait = economy.discord_countdown(status["next_in"]) if status else "in a few minutes"
         embed = discord.Embed(
-            title="\u26A1 Out of drops",
-            description=f"Your next drop lands in **{wait}**.",
+            title="Out of drops :(",
+            description=f"Your next drop recharges {wait}.",
             colour=discord.Colour(aesthetics.ACCENT_COLOR_INT),
         )
         if status:
@@ -316,8 +316,7 @@ class ChoiceCog(commands.Cog):
                 value=f"`{economy.charge_bar(status['charges'])}`",
                 inline=False,
             )
-        embed.set_footer(text=f"One drop every {economy.PULL_REGEN_SECONDS // 60} minutes, "
-                              f"up to {economy.PULL_CAP}.  ·  /pulls to check")
+        embed.set_footer(text=f"Collect up to {economy.PULL_CAP} drops at a rate of one every {economy.PULL_REGEN_SECONDS // 60} minutes. Use .c to spend them.")
         return embed
 
     async def _run_choice(self, ctx):

@@ -1,10 +1,7 @@
 """Checking how many choice drops you have, and when the next one lands.
 
-Two commands for one answer, because players reach for two different words:
-"how many pulls do I have" and "how long is my cooldown". Discord does not
-register a hybrid command's aliases as slash commands, so /pulls and /cooldown
-have to be declared separately; both delegate to the same builder, so there is
-only one place the status embed is defined.
+One command, /cooldown (.cooldown / .cd). There used to be a /pulls as well,
+but it showed exactly the same embed under a second name.
 """
 import os
 import sys
@@ -39,32 +36,25 @@ def build_status_embed(user, status):
     charges, cap = status["charges"], status["cap"]
     full = charges >= cap
 
+    # Plain lines in the description, not fields, and live Discord countdowns
+    # that tick in the client. The countdown tag renders its own "in", so the
+    # line reads "Next in 2 minutes" without writing "in" here.
+    if full:
+        timers = "\nFully charged, drop now with `.c`!"
+    else:
+        timers = (f"\nNext {economy.discord_countdown(status['next_in'])}\n"
+                  f"Full again {economy.discord_countdown(status['full_in'])}")
+
     embed = discord.Embed(
         title="Choice drops",
-        description=f"`{economy.charge_bar(charges)}`  **{charges} / {cap}**",
+        description=f"`{economy.charge_bar(charges)}`  **{charges} / {cap}**\n{timers}",
         # Green once the stack is full, so "am I wasting regeneration?" is
         # answerable from the colour alone.
         colour=discord.Colour.green() if full else discord.Colour(aesthetics.ACCENT_COLOR_INT),
     )
     embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
 
-    if full:
-        embed.add_field(name="Next drop",
-                        value=f"**Fully Changed**",
-                        inline=True)
-        embed.add_field(name="Full again",
-                        value=f"in **0s**",
-                        inline=True)
-    else:
-        embed.add_field(name="Next drop",
-                        value=f"in **{economy.format_duration(status['next_in'])}**",
-                        inline=True)
-        embed.add_field(name="Full again",
-                        value=f"in **{economy.format_duration(status['full_in'])}**",
-                        inline=True)
-
-    embed.set_footer(text=f"One drop every {economy.PULL_REGEN_SECONDS // 60} minutes, "
-                          f"up to {economy.PULL_CAP}. Spend them with .c")
+    embed.set_footer(text=f"Collect up to {economy.PULL_CAP} drops at a rate of one every {economy.PULL_REGEN_SECONDS // 60} minutes. Use .c to spend them.")
     return embed
 
 
@@ -95,15 +85,6 @@ class PullsCog(commands.Cog):
         status = await asyncio.to_thread(db.get_pull_status, target.id)
         await ctx.send(embed=build_status_embed(target, status))
 
-    @commands.hybrid_command(name="pulls", aliases=["pull"],
-                             description="How many choice drops you have stacked")
-    async def pulls(self, ctx, user: discord.Member = None):
-        """Check your choice drops.
-
-        Usage: /pulls or .pulls
-        """
-        await self._show(ctx, user)
-
     @commands.hybrid_command(name="cooldown", aliases=["cd"],
                              description="When your next choice drop arrives")
     async def cooldown(self, ctx, user: discord.Member = None):
@@ -112,10 +93,6 @@ class PullsCog(commands.Cog):
         Usage: /cooldown — or .cooldown / .cd
         """
         await self._show(ctx, user)
-
-    @pulls.error
-    async def pulls_error(self, ctx, error):
-        await report_unhandled(log, ctx, error, command="pulls")
 
     @cooldown.error
     async def cooldown_error(self, ctx, error):
