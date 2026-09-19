@@ -9,7 +9,7 @@ from db import (get_user_xp, add_user_xp, user_exists, get_all_artists,
                 get_top_users_by_xp, get_user_xp_rank)
 from utils.helpers import (pick_unique_song,
                            SOURPATCH_ID, SOURPATCH_IMAGE)
-from utils import aesthetics, odds
+from utils import aesthetics, economy, odds
 from utils.errors import report_unhandled
 from utils.vinyl import vinyl_gif_sig_art_from_url, vinyl_static_bytes
 import logging
@@ -317,20 +317,16 @@ class XPCog(commands.Cog):
         can_claim, remaining_seconds = can_claim_daily(ctx.author.id)
 
         if not can_claim:
-            # Calculate hours and minutes remaining
-            hours = int(remaining_seconds // 3600)
-            minutes = int((remaining_seconds % 3600) // 60)
-
-            time_left = ""
-            if hours > 0:
-                time_left += f"{hours}h "
-            if minutes > 0:
-                time_left += f"{minutes}m"
-            if not time_left:
-                time_left = "less than 1m"
-
+            # Second person, and no name: for a slash command Discord already
+            # prints "<user> used /daily" above the reply, and a prefix reply
+            # is attached to their message -- so the sentence does not have to
+            # carry the identity, and reads naturally instead.
+            #
+            # Plain text on purpose: a "come back later" note is not an event,
+            # and an embed would give it the weight of one.
             await ctx.send(
-                f"Daily reward already claimed! Claim again {time_left}.")
+                f"You've already claimed today's reward "
+                f"— come back {economy.discord_countdown(remaining_seconds)}.")
             return
 
         # Add daily XP reward and update claim timestamp
@@ -340,8 +336,18 @@ class XPCog(commands.Cog):
         add_user_xp(ctx.author.id, daily_xp)
         update_daily_claim(ctx.author.id)
 
-        await ctx.send(f"You claimed your daily reward of **{daily_xp} XP!**")
-        
+        # The claim itself is a reward, and the one thing a player does every
+        # day, so it gets an embed: the XP as the headline, their standing
+        # underneath, and a live countdown to the next one.
+        embed = discord.Embed(
+            title=f"You got +{daily_xp:,} XP from daily rewards!",
+            description=self.xp_progress_text(get_user_xp(ctx.author.id)),
+            colour=discord.Color.gold(),
+        )
+        embed.set_author(name=ctx.author.display_name,
+                         icon_url=ctx.author.display_avatar.url)
+        await ctx.send(embed=embed)
+
         # Check for level-up after claiming daily reward
         await self.check_level_up(ctx.author.id, level_checkpoint, ctx.channel, ctx.author)
 
