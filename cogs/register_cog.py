@@ -43,13 +43,12 @@ class RegisterCog(commands.Cog):
         if gift:
             embed.add_field(
                 name="🎁 Welcome gift",
-                value="**1 signature vinyl** is waiting for you — open it with `.sv`.",
+                value=f"**1 signature vinyl** {aesthetics.named_emoji('sig_vinyl')} is waiting for you — open it with `.sv`.",
                 inline=False,
             )
         embed.add_field(
             name="Getting started",
-            value="`.c` for a choice drop · `/collection` to see what you own · "
-                  "`/help` for everything else",
+            value="`.c` for a drop · `/collection` to see what you own · `/help` for more info · `/guide` for the official wiki",
             inline=False,
         )
         await ctx.send(embed=embed)

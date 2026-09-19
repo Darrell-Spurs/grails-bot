@@ -333,8 +333,7 @@ class XPCog(commands.Cog):
                 time_left = "less than 1m"
 
             await ctx.send(
-                f"⏰ **Daily reward already claimed!**\n"
-                f"You can claim your next daily reward in **{time_left}**.")
+                f"Daily reward already claimed! Claim again {time_left}.")
             return
 
         # Add daily XP reward and update claim timestamp
