@@ -371,39 +371,21 @@ class XPCog(commands.Cog):
             return
         
         vinyl_count = get_vinyl_count(target_user.id)
-        current_level = self.get_level_from_xp(get_user_xp(target_user.id))
-        
+        sig_count = get_sig_vinyl_count(target_user.id)
+
+        # Both counts in the description, not as fields: the phone app stacks
+        # every field on its own row, so two lines of text look the same
+        # everywhere. The name rides in the author line, which also leaves the
+        # thumbnail slot free rather than duplicating the avatar.
         embed = discord.Embed(
-            title=f"💽 {target_user.display_name}'s Vinyl Status",
-            color=discord.Color.from_rgb(139, 69, 19)
+            title="Vinyl Inventory",
+            description=(f"{named_emoji('sig_vinyl')} Signature vinyl: **{sig_count}**\n"
+                         f"{named_emoji('vinyl')} Vinyl: **{vinyl_count}**"),
+            color=discord.Color.from_rgb(139, 69, 19),
         )
-        
-        embed.add_field(
-            name="📀 Available Vinyl Pulls",
-            value=f"**{vinyl_count}** pulls remaining",
-            inline=True
-        )
-        
-        # embed.add_field(
-        #     name="📊 Current Level",
-        #     value=f"Level **{current_level}**",
-        #     inline=True
-        # )
-        
-        if vinyl_count > 0:
-            embed.add_field(
-                name="💡 How to Use",
-                value="Use `.vinyl` to claim vinyl songs!",
-                inline=False
-            )
-        else:
-            embed.add_field(
-                name="📈 Earn More",
-                value="Level up to earn more vinyl pulls!\nEach level gives you +1 vinyl pull.",
-                inline=False
-            )
-        
-        embed.set_thumbnail(url=target_user.display_avatar.url)
+        embed.set_author(name=target_user.display_name,
+                         icon_url=target_user.display_avatar.url)
+        embed.set_footer(text="Open them with .sv / .v")
         await ctx.send(embed=embed)
 
     async def _do_vinyl_pull(self, ctx, guaranteed_sig):
