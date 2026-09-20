@@ -286,6 +286,16 @@ def _cached_artists():
         _artists_cache["expires_at"] = now + _ARTISTS_TTL
     return _artists_cache["value"]
 
+def cached_artists():
+    """The artist-name list, cached and invalidated when one is added.
+
+    Public counterpart to _cached_artists, for callers outside this module --
+    notably the catalog autocompletes, which resolve an artist name on every
+    keystroke and must not hit the database each time.
+    """
+    return _cached_artists()
+
+
 def invalidate_artists_cache():
     """Call after adding/removing artists so pulls see them immediately."""
     _artists_cache["value"] = None

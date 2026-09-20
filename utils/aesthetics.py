@@ -34,7 +34,6 @@ RARITY_ORDER = ["ultimate", "legendary", "elite", "unique", "basic"]
 UNASSIGNED = "unassigned"
 UNASSIGNED_LABEL = "unassigned"
 UNASSIGNED_COLOR = "#8b93a1"        # neutral grey, unmistakably not a tier
-UNASSIGNED_DOT = "⬜"           # white large square
 
 RARITY_COLOR = {
     "ultimate":  "#ffeb83",
@@ -44,16 +43,6 @@ RARITY_COLOR = {
     "basic":     "#9ae1ff",
 }
 
-# One glyph per tier, used everywhere a rarity is shown on its own. There used
-# to be a second thematic set for headings; two vocabularies for one idea meant
-# the same tier looked different depending on which surface you were on.
-RARITY_DOT = {
-    "ultimate":  "\U0001F7E1",  # yellow circle
-    "legendary": "\U0001F7E0",  # orange circle
-    "elite":     "\U0001F534",  # red circle
-    "unique":    "\U0001F7E3",  # purple circle
-    "basic":     "\U0001F535",  # blue circle
-}
 
 
 # ---------------------------------------------------------------------------
@@ -143,13 +132,18 @@ def variant_colour_int(variant):
     return hex_to_int(variant_hex(variant))
 
 
-def rarity_dot(rarity):
-    return RARITY_DOT.get(_warned(rarity), UNASSIGNED_DOT)
-
-
 def rarity_emoji(rarity):
-    """Alias of rarity_dot(): one glyph per tier, everywhere."""
-    return rarity_dot(rarity)
+    """The glyph for a tier on its own: the guild emoji named after it.
+
+    "basic", "elite" and so on are the same names the card matrix uses for the
+    plain variant, so a tier shown on its own and a plain card of that tier are
+    deliberately the same image.
+
+    Returns "" when the emoji is not uploaded. There is no unicode stand-in --
+    a coloured circle that looks deliberate hides a missing upload, while a gap
+    is visibly a gap. `.emojicheck` lists what is absent.
+    """
+    return named_emoji(_warned(rarity))
 
 
 def variant_emoji(variant):
@@ -312,9 +306,9 @@ def card_emoji(rarity, variant="default"):
             found = _card_emojis.get(name.lower())
             if found:
                 return str(found)
-    # Last resort is the rarity dot: variant glyphs are guild uploads now and
-    # may be absent, while the dot is always present.
-    return rarity_dot(rarity)
+    # Last resort is the plain tier glyph, which is what a card of this rarity
+    # would look like without its variant.
+    return rarity_emoji(rarity)
 
 
 # ---------------------------------------------------------------------------
@@ -332,7 +326,9 @@ def card_emoji(rarity, variant="default"):
 # Names the bot asks the guild for. No unicode stand-ins: an emoji that is not
 # uploaded renders as nothing, which is visibly a gap rather than a glyph that
 # looks deliberate. `.emojicheck` lists what is missing.
-NAMED_EMOJI = {"vinyl", "sig_vinyl", "cookie", "sourpatch"} | set(VARIANT_EMOJI_NAME.values())
+NAMED_EMOJI = ({"vinyl", "sig_vinyl", "cookie", "sourpatch"}
+               | set(VARIANT_EMOJI_NAME.values())
+               | set(RARITY_ORDER))
 
 _named_emojis = {}
 

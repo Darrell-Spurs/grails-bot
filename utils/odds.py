@@ -81,4 +81,4 @@ SIG_VINYL_CHANCE = 0.10   # chance an ordinary .vinyl pull rolls signature odds
 
 # --- Mythic supply ----------------------------------------------------------
 
-MYTHIC_MAX_COPIES = 3     # copies of any one mythic that can exist server-wide
+MYTHIC_MAX_COPIES = 5     # copies of any one mythic that can exist server-wide

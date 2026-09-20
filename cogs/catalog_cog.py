@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 import asyncio
 import logging
+import time
 from typing import Optional
 
 import discord
@@ -20,8 +21,10 @@ from discord.ext import commands
 
 import db
 from utils import aesthetics
-from utils.collection_ui import RARITY_DOT, RARITY_ORDER, UNASSIGNED, rarity_rank
+from utils.collection_ui import (RARITY_ORDER, UNASSIGNED, rarity_emoji, rarity_rank,
+                                 safe_option_emoji)
 from utils.command_types import slash_only
+from utils.helpers import cached_artists
 from utils.errors import report_unhandled
 
 log = logging.getLogger("grails.catalog")
@@ -41,6 +44,83 @@ async def _catalog_artist_autocomplete(interaction: discord.Interaction, current
     return [app_commands.Choice(name=a, value=a) for a in artists if cur in a.lower()][:25]
 
 
+# Album lists are read once per keystroke while someone types into the album
+# argument, and the query costs ~185ms against a remote database. A short TTL
+# keeps a burst of typing to one round trip without letting the list go stale
+# for longer than it takes to notice a newly imported release.
+_ALBUM_TTL = 60.0
+_album_cache = {}
+
+
+def _cached_album_counts(artist):
+    key = artist.lower()
+    now = time.time()
+    hit = _album_cache.get(key)
+    if hit and now < hit[0]:
+        return hit[1]
+    rows = db.get_album_song_counts(artist)
+    _album_cache[key] = (now + _ALBUM_TTL, rows)
+    return rows
+
+
+async def _album_autocomplete(interaction: discord.Interaction, current: str):
+    """Albums for whichever artist has already been chosen.
+
+    Discord shows 25 suggestions but filters against the whole list as the user
+    types, so every release stays reachable -- which the select menu cannot
+    manage, since it is hard-capped at 25 options and Taylor Swift alone has 71
+    albums.
+    """
+    artist = getattr(interaction.namespace, "artist", None)
+    if not artist:
+        return [app_commands.Choice(name="Pick an artist first", value="")]
+
+    resolved = _resolve_artist(artist)
+    if not resolved:
+        return []
+    try:
+        rows = _cached_album_counts(resolved)
+    except Exception:
+        log.exception("album autocomplete failed for %s", resolved)
+        return []
+
+    cur = (current or "").lower()
+    choices = []
+    for name, count in rows:               # already ordered fullest-first
+        if cur and cur not in name.lower():
+            continue
+        # Discord caps a choice name at 100 characters and several soundtrack
+        # releases genuinely run longer.
+        label = f"{name} ({count})"
+        choices.append(app_commands.Choice(name=label[:100], value=name[:100]))
+        if len(choices) == 25:
+            break
+    return choices or [app_commands.Choice(name="No albums match", value="")]
+
+
+def _resolve_album(artist, name):
+    """Match a typed album against one of `artist`'s releases, or None.
+
+    Autocomplete sends the exact name, but the value is truncated at 100
+    characters and a player may type freehand, so exact, prefix and substring
+    matches are all accepted.
+    """
+    if not name:
+        return None
+    wanted = name.strip().lower()
+    albums = [a for a, _ in _cached_album_counts(artist)]
+    for a in albums:
+        if a.lower() == wanted:
+            return a
+    for a in albums:                       # autocomplete truncates at 100 chars
+        if a.lower().startswith(wanted):
+            return a
+    for a in albums:
+        if wanted in a.lower():
+            return a
+    return None
+
+
 async def _rarity_autocomplete(interaction: discord.Interaction, current: str):
     cur = (current or "").lower()
     return [app_commands.Choice(name=r.title(), value=r)
@@ -53,17 +133,27 @@ def _resolve_artist(name):
     if not name:
         return None
     lowered = name.strip().lower()
-    for a in db.get_all_artists():
+    # Cached, not a fresh query: autocomplete resolves the artist on every
+    # keystroke, and this used to read the whole artist table twice per call.
+    artists = cached_artists()
+    for a in artists:
         if a.lower() == lowered:
             return a
-    for a in db.get_all_artists():
+    for a in artists:
         if lowered in a.lower():
             return a
     return None
 
 
 class Paginator(discord.ui.View):
-    """Prev/next over a list of preformatted lines."""
+    """Prev/next over a list of preformatted lines.
+
+    Anyone may drive it. Every subclass browses the public catalogue, where the
+    controls only choose which slice is on screen -- refusing a bystander's
+    click buys nothing and just makes them re-run the command to read the same
+    list. Views that act on one person's data lock themselves instead
+    (CardView, ProfileView in utils/collection_ui.py and cogs/profile_cog.py).
+    """
 
     def __init__(self, invoker_id, lines, title, colour, footer_note=""):
         super().__init__(timeout=180)
@@ -96,13 +186,6 @@ class Paginator(discord.ui.View):
                 elif child.label == "Next":
                     child.disabled = self.page >= self.pages - 1
         return embed
-
-    async def interaction_check(self, interaction):
-        if interaction.user.id != self.invoker_id:
-            await interaction.response.send_message(
-                "That menu belongs to someone else — run the command yourself.", ephemeral=True)
-            return False
-        return True
 
     async def on_timeout(self):
         for child in self.children:
@@ -163,9 +246,9 @@ class ArtistsView(Paginator):
         for i, artist in enumerate(ranked, 1):
             n = counts.get(artist.lower(), 0)
             if self.sort == "collected":
-                tail = f"{n} cop{'y' if n == 1 else 'ies'}"
+                tail = f"{n} claimed songs"
             else:
-                tail = f"{n} {'person' if n == 1 else 'people'}"
+                tail = f"{n} favorited"
             lines.append(f"`{i:>2}` **{artist}**  ·  {tail}")
         return lines
 
@@ -194,6 +277,210 @@ class ArtistsView(Paginator):
         self._install_select()
         await interaction.response.edit_message(embed=self.render(), view=self)
 
+
+
+# Release categories, longest first. The emoji replaces the word on every line,
+# so the three have to be tellable apart at Discord's ~18px, not merely be from
+# the same family -- that is why the Single is a note rather than a third disc.
+ALBUM_CATEGORIES = ("Album", "EP", "Single")
+ALBUM_FILTERS = {"Album": "Albums", "EP": "EPs", "Single": "Singles"}
+ALBUM_CATEGORY_EMOJI = {"Album": "\U0001F4BF", "EP": "\U0001F4BD", "Single": "\U0001F3B5"}
+
+
+class AlbumsView(Paginator):
+    """An artist's releases, one category at a time.
+
+    Sorted A-Z. Release date would order these better, but the albums table
+    holds only id, name, artist, artist_id and image -- no date is imported, so
+    there is nothing to sort on.
+
+    Filtering works over a snapshot taken when the command ran: one artist's
+    release list is small, so re-filtering in memory beats a round trip per
+    press of the menu.
+    """
+
+    def __init__(self, invoker_id, artist, releases):
+        self.artist = artist
+        self.releases = releases
+        self.counts = {c: sum(1 for r in releases if r["category"] == c)
+                       for c in ALBUM_CATEGORIES}
+        # Open on the fullest release type the artist actually has: a singles
+        # artist should not land on an empty "Albums" page.
+        self.category = next((c for c in ALBUM_CATEGORIES if self.counts[c]),
+                             ALBUM_CATEGORIES[0])
+        super().__init__(invoker_id, self._lines(), self._title(),
+                         discord.Colour(0x5B4BDB))
+        # Paginator clears its children on a single page; the filter has to
+        # outlive that, since switching category is the point of the menu.
+        self._install_select()
+
+    def _title(self):
+        return f"{self.artist} — {ALBUM_FILTERS[self.category]}"
+
+    def _lines(self):
+        rows = sorted((r for r in self.releases if r["category"] == self.category),
+                      key=lambda a: a["name"].lower())
+        emoji = ALBUM_CATEGORY_EMOJI[self.category]
+        return [f"{emoji} **{discord.utils.escape_markdown(a['name'])}**  ·  {a['tracks']} track"
+                f"{'' if a['tracks'] == 1 else 's'}" for a in rows]
+
+    def render(self):
+        self.title = self._title()
+        embed = super().render()
+        if not self.counts[self.category]:
+            embed.description = (f"_No {ALBUM_FILTERS[self.category].lower()} "
+                                 f"for **{self.artist}**._")
+        return embed
+
+    def _install_select(self):
+        select = discord.ui.Select(
+            placeholder="Show…", row=1,
+            options=[discord.SelectOption(label=f"{ALBUM_FILTERS[c]} ({self.counts[c]})",
+                                          value=c,
+                                          emoji=safe_option_emoji(ALBUM_CATEGORY_EMOJI[c]),
+                                          default=(c == self.category))
+                     for c in ALBUM_CATEGORIES],
+        )
+        select.callback = self._on_filter
+        self._filter_select = select
+        self.add_item(select)
+
+    async def _on_filter(self, interaction):
+        self.category = self._filter_select.values[0]
+        self.page = 0
+        self.lines = self._lines()
+        self.clear_items()
+        if self.pages > 1:
+            self.add_item(self.prev)
+            self.add_item(self.next)
+        self._install_select()
+        await interaction.response.edit_message(embed=self.render(), view=self)
+
+
+
+# A select may hold 25 options, one of which is "All albums".
+MAX_ALBUM_OPTIONS = 24
+
+
+class SongsView(Paginator):
+    """An artist's songs, filterable by album.
+
+    Entries carry the *set* of albums a song appears on, not just one: a track
+    that is on both the standard and the deluxe edition has to be findable under
+    either, and collapsing it to a single album would hide it from one of them.
+    """
+
+    def __init__(self, invoker_id, artist, entries, counts, rarity=None, album=None):
+        self.artist = artist
+        self.entries = entries
+        self.counts = counts
+        self.rarity = rarity
+        self.album = album or "all"
+
+        seen = {}
+        for e in entries:
+            for name in e["albums"]:
+                seen[name] = seen.get(name, 0) + 1
+        # Ordered by how many songs each release contributes, not A-Z: albums
+        # and EPs then sort to the top and the one-track singles fall to the
+        # bottom, which is both the order people look in and -- since the menu
+        # can only hold 24 -- means anything cut is a single rather than a
+        # record.
+        self.albums = sorted(seen, key=lambda name: (-seen[name], name.lower()))
+        self.album_counts = seen
+
+        super().__init__(invoker_id, self._lines(), self._title(),
+                         self._colour(), footer_note=self._spread())
+        self._install_select()
+
+    # -- data ---------------------------------------------------------------
+    def _visible(self):
+        if self.album == "all":
+            return self.entries
+        return [e for e in self.entries if self.album in e["albums"]]
+
+    def _lines(self):
+        rows = sorted(self._visible(),
+                      key=lambda e: (rarity_rank(e["rarity"]), e["name"].lower()))
+        lines = []
+        for e in rows:
+            # Under a filter the album is already in the title, so the tail
+            # would just repeat it on every row.
+            if self.album == "all":
+                album = sorted(e["albums"], key=str.lower)[0] if e["albums"] else "—"
+                lines.append(f"{rarity_emoji(e['rarity'])} **{e['name']}** — _{album}_")
+            else:
+                lines.append(f"{rarity_emoji(e['rarity'])} **{e['name']}**")
+        return lines
+
+    def _title(self):
+        if self.album == "all":
+            title = f"{self.artist} — Discography"
+        else:
+            title = f"{self.artist} — songs from {self.album}"
+        if self.rarity:
+            title += f" · {self.rarity}"
+        return title[:256]
+
+    def _spread(self):
+        counts = {}
+        for e in self._visible():
+            counts[e["rarity"]] = counts.get(e["rarity"], 0) + 1
+        spread = " ".join(f"{counts[r]} {r} /"
+                           for r in RARITY_ORDER if counts.get(r))
+        spread = spread.rstrip(" / ")
+        return spread
+
+    def _colour(self):
+        top = min((rarity_rank(e["rarity"]) for e in self._visible()),
+                  default=len(RARITY_ORDER))
+        return discord.Colour(
+            aesthetics.rarity_colour_int(RARITY_ORDER[top]) if top < len(RARITY_ORDER)
+            else aesthetics.ACCENT_COLOR_INT)
+
+    def render(self):
+        self.title = self._title()
+        self.colour = self._colour()
+        self.footer_note = self._spread()
+        embed = super().render()
+        if not self._visible():
+            embed.description = f"_Nothing here for **{self.album}**._"
+        return embed
+
+    # -- the album menu -----------------------------------------------------
+    def _install_select(self):
+        shown = self.albums[:MAX_ALBUM_OPTIONS]
+        # The menu holds 24 releases; an album picked through the command
+        # argument may not be among them, and the menu has to be able to show
+        # what is currently selected. Pin it and drop the smallest instead.
+        if self.album != "all" and self.album not in shown:
+            shown = [self.album] + shown[:MAX_ALBUM_OPTIONS - 1]
+
+        options = [discord.SelectOption(label=f"Full discography ({len(self.entries)})",
+                                        value="all", default=(self.album == "all"))]
+        for name in shown:
+            options.append(discord.SelectOption(
+                # Discord caps a label at 100 characters and some release names
+                # genuinely run longer than that.
+                label=f"{name} ({self.album_counts[name]})"[:100],
+                value=name[:100],
+                default=(name == self.album)))
+
+        select = discord.ui.Select(placeholder="Filter by album…", row=1, options=options)
+        select.callback = self._on_filter
+        self._album_select = select
+        self.add_item(select)
+
+    async def _on_filter(self, interaction):
+        self.album = self._album_select.values[0]
+        self.page = 0
+        self.lines = self._lines()
+        self.clear_items()
+        if self.pages > 1:
+            self.add_item(self.prev)
+            self.add_item(self.next)
+        self._install_select()
+        await interaction.response.edit_message(embed=self.render(), view=self)
 
 
 class CatalogCog(commands.Cog):
@@ -246,22 +533,20 @@ class CatalogCog(commands.Cog):
                                     "tracks": 0}
             albums[album_id]["tracks"] += 1
 
-        order = {"Album": 0, "EP": 1, "Single": 2}
-        rows = sorted(albums.values(),
-                      key=lambda a: (order.get(a["category"], 3), a["name"].lower()))
-        lines = [f"**{a['name']}** — {a['category']} · {a['tracks']} track"
-                 f"{'' if a['tracks'] == 1 else 's'}" for a in rows]
-
-        view = Paginator(ctx.author.id, lines, f"💿 {resolved} — releases",
-                         discord.Colour(0x5B4BDB))
-        view.message = await ctx.send(embed=view.render(), view=view if view.pages > 1 else None)
+        view = AlbumsView(ctx.author.id, resolved, list(albums.values()))
+        # Always attach: the category filter is live even on a single page.
+        view.message = await ctx.send(embed=view.render(), view=view)
 
     # ---- /songs -----------------------------------------------------------
     @commands.hybrid_command(name="songs", description="List an artist's songs, with an optional rarity filter")
     @slash_only()
-    @app_commands.describe(artist="Which artist", rarity="Only show this rarity")
-    @app_commands.autocomplete(artist=_catalog_artist_autocomplete, rarity=_rarity_autocomplete)
-    async def songs(self, ctx, artist: str, rarity: Optional[str] = None):
+    @app_commands.describe(artist="Which artist", rarity="Only show this rarity",
+                           album="Only show songs from this release")
+    @app_commands.autocomplete(artist=_catalog_artist_autocomplete,
+                               rarity=_rarity_autocomplete,
+                               album=_album_autocomplete)
+    async def songs(self, ctx, artist: str, rarity: Optional[str] = None,
+                    album: Optional[str] = None):
         await ctx.defer()
         resolved = await self.bot.loop.run_in_executor(None, _resolve_artist, artist)
         if not resolved:
@@ -280,11 +565,18 @@ class CatalogCog(commands.Cog):
             await ctx.send(f"📭 No songs linked to **{resolved}** yet.")
             return
 
-        # A song on several albums appears once per album; collapse to one entry.
+        # A song on several albums appears once per album. Collapse to one entry
+        # but keep every album it belongs to, so the album filter can find it
+        # under the deluxe edition as well as the standard one.
         songs = {}
         for song_id, name, song_rarity, album_name, _tc, _img, _aid in rows:
-            songs.setdefault(song_id, {"name": name, "rarity": (song_rarity or UNASSIGNED).lower(),
-                                       "album": album_name})
+            entry = songs.setdefault(song_id, {
+                "name": name,
+                "rarity": (song_rarity or UNASSIGNED).lower(),
+                "albums": set(),
+            })
+            if album_name:
+                entry["albums"].add(album_name)
         entries = list(songs.values())
 
         counts = {}
@@ -294,26 +586,23 @@ class CatalogCog(commands.Cog):
         if wanted:
             entries = [e for e in entries if e["rarity"] == wanted]
             if not entries:
-                have = ", ".join(f"{RARITY_DOT.get(r, '')} {r} ({counts[r]})"
+                have = ", ".join(f"{rarity_emoji(r)} {r} ({counts[r]})"
                                  for r in RARITY_ORDER if counts.get(r))
                 await ctx.send(f"📭 **{resolved}** has no **{wanted}** songs.\nAvailable: {have}")
                 return
 
-        entries.sort(key=lambda e: (rarity_rank(e["rarity"]), e["name"].lower()))
-        lines = [f"{RARITY_DOT.get(e['rarity'], '')} **{e['name']}** — _{e['album'] or '—'}_"
-                 for e in entries]
+        chosen = None
+        if album:
+            chosen = await asyncio.to_thread(_resolve_album, resolved, album)
+            if not chosen:
+                await ctx.send(f"🔍 **{resolved}** has no release called **{album}**. "
+                               f"Leave it blank to see the whole discography.")
+                return
 
-        title = f"🎵 {resolved} — songs"
-        if wanted:
-            title += f" · {wanted}"
-        spread = "  ".join(f"{RARITY_DOT[r]}{counts[r]}" for r in RARITY_ORDER if counts.get(r))
-        top = min((rarity_rank(e["rarity"]) for e in entries), default=len(RARITY_ORDER))
-        colour = discord.Colour(
-            aesthetics.rarity_colour_int(RARITY_ORDER[top]) if top < len(RARITY_ORDER)
-            else aesthetics.hex_to_int(aesthetics.ACCENT_COLOR))
-
-        view = Paginator(ctx.author.id, lines, title, colour, footer_note=spread)
-        view.message = await ctx.send(embed=view.render(), view=view if view.pages > 1 else None)
+        view = SongsView(ctx.author.id, resolved, entries, counts,
+                         rarity=wanted, album=chosen)
+        # Always attach: the album filter is live even on a single page.
+        view.message = await ctx.send(embed=view.render(), view=view)
 
     # ---- errors -----------------------------------------------------------
     @artists.error

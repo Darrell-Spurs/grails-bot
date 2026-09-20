@@ -40,11 +40,17 @@ async def _song_autocomplete(interaction: discord.Interaction, current: str):
     The value is the song id, so the command never has to re-resolve a title
     that two artists might share.
     """
+    cur = (current or "").strip().lower()
+    # Nothing until they type. An artist can have hundreds of songs, and an
+    # unprompted list of 25 arbitrary titles is noise -- the first keystroke is
+    # what makes the suggestions mean anything.
+    if not cur:
+        return []
+
     artist = getattr(interaction.namespace, "artist", None)
     if not artist:
         return [app_commands.Choice(name="Pick an artist first", value="none")]
 
-    cur = (current or "").lower()
     try:
         rows = db.get_songs_with_ids_by_artist(artist)
     except Exception:
@@ -78,13 +84,13 @@ class MythicCog(commands.Cog):
         await ctx.defer()
 
         if song == "none":
-            await ctx.send("Pick a song from the autocomplete list.")
+            await ctx.send("Please pick a song.")
             return
 
         resolved = await self.bot.loop.run_in_executor(
             None, self._resolve, artist, song)
         if resolved is None:
-            await ctx.send(f"🔍 Could not find that song under **{artist}**.")
+            await ctx.send(f"Could not find that song under **{artist}**.")
             return
 
         song_id, song_name, artist_name, rarity, album_name, album_image = resolved
@@ -101,20 +107,9 @@ class MythicCog(commands.Cog):
             colour=discord.Colour(aesthetics.rarity_colour_int(rarity)),
         )
         embed.add_field(name="Copies claimed", value=f"`{filled}`  {claimed} / {cap}", inline=False)
-        embed.add_field(
-            name="Still available" if info["can_collect"] else "Sold out",
-            value=(f"**{info['remaining_copies']}** left — the next claim will be "
-                   f"**#{info['next_copy_number']}**")
-            if info["can_collect"] else "Every copy has been claimed.",
-            inline=False,
-        )
-        # Whether *you* hold one is safe to show; who else does is not disclosed.
-        if mine:
-            embed.add_field(name="You", value=f"You hold copy **#{mine}**", inline=False)
 
         if album_image:
             embed.set_thumbnail(url=album_image)
-        embed.set_footer(text="Mythics are capped server-wide — once they are gone, they are gone.")
 
         await ctx.send(embed=embed)
 

@@ -12,7 +12,7 @@ from discord.ext import commands
 
 import db
 from utils.collection_ui import (
-    RARITY_ORDER, CardView, CollectionView, _dot, build_card_embed, card_emoji,
+    RARITY_ORDER, CardView, CollectionView, build_card_embed, card_emoji, rarity_emoji,
     rarity_colour,
 )
 from utils.command_types import slash_only
@@ -197,7 +197,7 @@ class ProfileCog(commands.Cog):
         )
 
         spread = " ".join(
-            f"{_dot(r)}{data['rarity_counts'][r]}"
+            f"{rarity_emoji(r)}{data['rarity_counts'][r]}"
             for r in RARITY_ORDER if data["rarity_counts"].get(r)
         )
         embed.add_field(name="Rarity spread", value=spread or "—", inline=True)

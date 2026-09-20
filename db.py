@@ -630,6 +630,28 @@ def get_all_artists():
     conn.close()
     return [row[0] for row in results]  # List of artist names
 
+def get_album_song_counts(artist):
+    """[(album_name, song_count)] for one artist, fullest release first.
+
+    Deliberately narrow: album autocomplete fires on every keystroke, and
+    pulling one artist's whole song list to count albums in Python would mean
+    shipping 400+ rows per character for a back catalogue like Taylor Swift's.
+    """
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("""
+        SELECT albums.name, COUNT(DISTINCT song_album.song_id) AS songs
+        FROM albums
+        JOIN song_album ON song_album.album_id = albums.id
+        WHERE albums.artist = ? COLLATE NOCASE
+        GROUP BY albums.name
+        ORDER BY songs DESC, albums.name ASC
+    """, (artist,))
+    rows = c.fetchall()
+    conn.close()
+    return [(name, n) for name, n in rows]
+
+
 def get_artist_collected_counts():
     """{artist_lower: total copies collected server-wide}.
 

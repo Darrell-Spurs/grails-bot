@@ -21,13 +21,14 @@ log = logging.getLogger("grails.ui")
 
 # ---------------------------------------------------------------------------
 # Vocabulary lives in utils/aesthetics.py. Re-exported here so the existing
-# `from utils.collection_ui import RARITY_DOT, ...` call sites keep working.
+# `from utils.collection_ui import rarity_emoji, ...` call sites keep working.
 # ---------------------------------------------------------------------------
 
 from utils.aesthetics import (  # noqa: F401
-    ACCENT_COLOR, RARITY_COLOR, RARITY_DOT, RARITY_ORDER, UNASSIGNED,
+    ACCENT_COLOR, RARITY_COLOR, RARITY_ORDER, UNASSIGNED,
     TEXT_PRESENTATION_BASES, VARIANT_COLOR, VARIANT_LABEL, VARIANTS,
-    card_emoji, rarity_rank, safe_option_emoji, variant_emoji, variant_rank,
+    card_emoji, rarity_emoji, rarity_rank, safe_option_emoji, variant_emoji,
+    variant_rank,
 )
 
 SORTS = {
@@ -44,10 +45,6 @@ TIMEOUT = 180
 def rarity_colour(rarity):
     """discord.Colour for a rarity, from the shared palette."""
     return discord.Colour(aesthetics.rarity_colour_int(rarity))
-
-
-def _dot(rarity):
-    return aesthetics.rarity_dot(rarity)
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +260,17 @@ class CardView(_OwnerView):
 class CollectionView(_OwnerView):
     """Paginated collection list with variant/sort controls and a card opener."""
 
+
+    async def interaction_check(self, interaction):
+        """Anyone may browse, page and filter a collection.
+
+        Reading somebody's collection is already public -- /collection takes a
+        user argument -- so locking the pager only forced a bystander to re-run
+        the command to see the same cards. The actions that change anything live
+        on CardView, which stays locked to its own invoker.
+        """
+        return True
+
     def __init__(self, invoker_id, owner_id, owner_name, *, variant=None,
                  artist=None, sort="variant"):
         super().__init__(invoker_id)
@@ -353,8 +361,11 @@ class CollectionView(_OwnerView):
         if not card:
             await interaction.response.send_message("That card is gone.", ephemeral=True)
             return
+        # Keyed to the clicker, not the original invoker: anyone can drive this
+        # list now, and a stranger who opens a card must be able to use Back.
+        # CardView decides for itself which buttons a non-owner may see.
         view = CardView(
-            self.invoker_id, card, self.owner_name,
+            interaction.user.id, card, self.owner_name,
             origin=self,                       # so Back restores this exact page
             owner_id=self.owner_id,
         )
