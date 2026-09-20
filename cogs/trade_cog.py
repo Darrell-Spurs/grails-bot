@@ -142,7 +142,7 @@ class TradeCog(commands.Cog):
                            item="The song to offer (pick from autocomplete)")
     @app_commands.autocomplete(rarity=_rarity_autocomplete, artist=_own_artist_autocomplete, item=_own_item_autocomplete)
     async def trade(self, ctx, user: discord.Member, rarity: str, *, artist: Optional[str] = None, item: str):
-        """Initiate a trade with another user.
+        """Start a trade with another user.
         Usage: .trade @user rarity <song> — or use /trade for autocomplete (+ optional artist filter).
         """
         rarity = (rarity or "").lower()
@@ -328,7 +328,7 @@ class TradeCog(commands.Cog):
     @commands.hybrid_command(name="canceltrade", description="Cancel any active trade requests")
     @slash_only()
     async def canceltrade(self, ctx):
-        """Cancel any active trade requests"""
+        """Cancel active trade requests"""
         cancelled = False
 
         for key, data in list(self.active_trades.items()):

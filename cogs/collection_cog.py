@@ -45,7 +45,7 @@ class CollectionCog(commands.Cog):
 
     @commands.hybrid_command(
         name="collection",
-        description="Browse a user's song collection",
+        description="Browse a user's collection",
     )
     @slash_only()
     @app_commands.describe(

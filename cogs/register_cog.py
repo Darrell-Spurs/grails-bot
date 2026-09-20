@@ -13,7 +13,7 @@ class RegisterCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @commands.hybrid_command(description="Register with the bot to start collecting")
+    @commands.hybrid_command(description="Register an account to start collecting")
     @slash_only()
     async def register(self, ctx):
         # Check if user is already registered

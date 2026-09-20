@@ -45,7 +45,7 @@ class ViewCog(commands.Cog):
 
     @commands.hybrid_command(
         name="view",
-        description="View one card. Defaults to your most recent pull.",
+        description="View a card. Defaults to your most recent pull.",
     )
     @slash_only()
     @app_commands.describe(

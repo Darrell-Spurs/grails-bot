@@ -132,7 +132,7 @@ class ProfileCog(commands.Cog):
 
     @commands.hybrid_command(
         name="profile",
-        description="Your collector profile: pinned card, favorites and totals.",
+        description="View a player's profile.",
     )
     @slash_only()
     @app_commands.describe(user="Whose profile to show (defaults to you)")

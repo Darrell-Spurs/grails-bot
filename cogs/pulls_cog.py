@@ -88,7 +88,7 @@ class PullsCog(commands.Cog):
     @commands.hybrid_command(name="cooldown", aliases=["cd"],
                              description="When your next choice drop arrives")
     async def cooldown(self, ctx, user: discord.Member = None):
-        """Check when your next choice drop arrives.
+        """Check when your next drop arrives.
 
         Usage: /cooldown — or .cooldown / .cd
         """

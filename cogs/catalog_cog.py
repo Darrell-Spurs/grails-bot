@@ -488,7 +488,7 @@ class CatalogCog(commands.Cog):
         self.bot = bot
 
     # ---- /artists ---------------------------------------------------------
-    @commands.hybrid_command(name="artists", description="List every artist in the pull pool")
+    @commands.hybrid_command(name="artists", description="List every artist available")
     @slash_only()
     async def artists(self, ctx):
         await ctx.defer()
@@ -507,7 +507,7 @@ class CatalogCog(commands.Cog):
         view.message = await ctx.send(embed=view.render(), view=view)
 
     # ---- /albums ----------------------------------------------------------
-    @commands.hybrid_command(name="albums", description="List an artist's releases in the pool")
+    @commands.hybrid_command(name="albums", description="List an artist's available releases")
     @slash_only()
     @app_commands.describe(artist="Which artist")
     @app_commands.autocomplete(artist=_catalog_artist_autocomplete)
@@ -538,7 +538,7 @@ class CatalogCog(commands.Cog):
         view.message = await ctx.send(embed=view.render(), view=view)
 
     # ---- /songs -----------------------------------------------------------
-    @commands.hybrid_command(name="songs", description="List an artist's songs, with an optional rarity filter")
+    @commands.hybrid_command(name="songs", description="List an artist's songs")
     @slash_only()
     @app_commands.describe(artist="Which artist", rarity="Only show this rarity",
                            album="Only show songs from this release")

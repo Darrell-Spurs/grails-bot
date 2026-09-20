@@ -65,9 +65,7 @@ class SongBattleCog(commands.Cog):
     @slash_only()
     @app_commands.describe(rounds=f"First to how many round-wins takes the match? ({MIN_ROUNDS}-{MAX_ROUNDS}, default {DEFAULT_ROUNDS})")
     async def songbattle(self, ctx, rounds: app_commands.Range[int, MIN_ROUNDS, MAX_ROUNDS] = DEFAULT_ROUNDS):
-        """Start a song battle. Players react to join, pull order is randomized, then each
-        player uses `.b`/`/b` on their turn to reveal their pull, and everyone votes at the end
-        of each round. First to `rounds` round-wins takes the match."""
+        """Start a song battle game"""
         if ctx.channel.id in self.active_battles:
             await ctx.send("❌ A song battle is already running in this channel!")
             return
@@ -82,7 +80,7 @@ class SongBattleCog(commands.Cog):
 
     @commands.command(name="battle", aliases=["b"], description="Pull your song when it's your turn in a Song Battle")
     async def battle_pull(self, ctx):
-        """Reveal your pull in the active Song Battle in this channel, if it's your turn."""
+        """Pull a song for an active Song Battle"""
         session = self.active_battles.get(ctx.channel.id)
         if not session or session.get("phase") != "reveal":
             await ctx.send("❌ There's no song battle waiting for a pull in this channel! "

@@ -263,7 +263,7 @@ class ChoiceCog(commands.Cog):
     @commands.command(name="choice", aliases=["c"], description="Get 3 random songs to choose from")
     @commands.cooldown(rate=1, per=3, type=commands.BucketType.user)
     async def choice(self, ctx):
-        """Spend one drop charge, then run a pull.
+        """Pull a drop & pick a song
 
         The charge is taken before any work starts, so a pull can never be had
         for free by firing the command twice quickly. The per-user lock is what

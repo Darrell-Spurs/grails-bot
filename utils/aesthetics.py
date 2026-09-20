@@ -326,7 +326,7 @@ def card_emoji(rarity, variant="default"):
 # Names the bot asks the guild for. No unicode stand-ins: an emoji that is not
 # uploaded renders as nothing, which is visibly a gap rather than a glyph that
 # looks deliberate. `.emojicheck` lists what is missing.
-NAMED_EMOJI = ({"vinyl", "sig_vinyl", "cookie", "sourpatch"}
+NAMED_EMOJI = ({"vinyl", "sig_vinyl", "cookie", "sourpatch", "livvinyl"}
                | set(VARIANT_EMOJI_NAME.values())
                | set(RARITY_ORDER))
 

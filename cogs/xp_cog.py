@@ -150,7 +150,7 @@ class XPCog(commands.Cog):
     @commands.hybrid_command(description="Check your XP or another user's XP")
     @slash_only()
     async def xp(self, ctx, user: discord.User = None):
-        """Check your current XP or another user's XP
+        """Check a user's XP
         Usage: .xp [@user]
         Example: .xp or .xp @username
         """
@@ -184,7 +184,7 @@ class XPCog(commands.Cog):
     @slash_only()
     @app_commands.describe(count="How many players to show (1-25, default 10)")
     async def top(self, ctx, count: int = 10):
-        """Show the highest-XP players.
+        """Show the XP leaderboard.
 
         Your own standing is appended when you are not already on the page, so
         the command answers "where am I?" as well as "who is winning?".
@@ -324,7 +324,7 @@ class XPCog(commands.Cog):
 
     @commands.hybrid_command(aliases=['vc'], description="Check available vinyl pulls")
     async def vinylcheck(self, ctx, user: discord.User = None):
-        """Check how many vinyl pulls you or another user has available
+        """Check a user's vinyl pull inventory
         Usage: .vinylcheck [@user]
         Example: .vinylcheck or .vinylcheck @username
         """
@@ -442,12 +442,12 @@ class XPCog(commands.Cog):
 
     @commands.command(aliases=['sv'], description="Pull a guaranteed signature vinyl song")
     async def sigvinyl(self, ctx):
-        """Pull a guaranteed signature vinyl rarity song"""
+        """Open a signature vinyl"""
         await self._do_vinyl_pull(ctx, guaranteed_sig=True)
 
     @commands.command(aliases=['v'], description="Pull a vinyl song from your rewards")
     async def vinyl(self, ctx):
-        """Pull a vinyl rarity song from rewards"""
+        """Open a vinyl with a chance of being a signature vinyl"""
         await self._do_vinyl_pull(ctx, guaranteed_sig=False)
 
     @vinyl.error

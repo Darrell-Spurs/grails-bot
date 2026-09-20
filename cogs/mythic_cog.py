@@ -76,7 +76,7 @@ class MythicCog(commands.Cog):
 
     @commands.hybrid_command(
         name="mythiccheck",
-        description="How many mythic copies of a song are left")
+        description="Check how many mythic copies of a song are claimed")
     @slash_only()
     @app_commands.describe(artist="The artist", song="The song (pick the artist first)")
     @app_commands.autocomplete(artist=_artist_autocomplete, song=_song_autocomplete)

@@ -9,6 +9,7 @@ from discord.ext import commands
 
 from utils.command_types import slash_only
 from utils.errors import report_unhandled
+from utils import aesthetics
 
 log = logging.getLogger("grails.help")
 
@@ -16,6 +17,24 @@ log = logging.getLogger("grails.help")
 _ADMIN_CHECK_PREFIXES = ("has_role", "has_any_role", "has_permissions", "is_owner")
 
 BLANK = "​"  # zero-width space: Discord requires a non-empty field name
+
+BRIEF_MAX = 72
+
+# The sections, and the order of commands inside them, mirror commands.md so the
+# in-Discord help and the repo reference cannot tell different stories. There is
+# no automatic link between the two -- reorder one, reorder the other.
+#
+# A command missing from here still appears, under "More". A hardcoded map would
+# otherwise let a newly added command silently never show up in /help.
+HELP_SECTIONS = (
+    ("Drops", ("choice", "sigvinyl", "vinyl", "cooldown")),
+    ("Trading", ("trade", "offer", "canceltrade")),
+    ("Your account", ("register", "collection", "profile", "view", "xp",
+                      "daily", "vinylcheck")),
+    ("Catalogue", ("artists", "albums", "songs", "mythiccheck")),
+    ("Games", ("songbattle", "battle", "top")),
+    ("Help", ("help", "xphelp", "guide", "ping")),
+)
 
 
 def _is_admin_command(cmd) -> bool:
@@ -27,23 +46,50 @@ def _is_admin_command(cmd) -> bool:
 
 
 def _brief(cmd) -> str:
+    """One short line, trimmed on a word boundary.
+
+    Several docstrings open with a sentence longer than a help row can hold,
+    and cutting mid-word reads like a bug rather than an abbreviation.
+    """
     text = (cmd.help or cmd.description or "").strip()
-    return text.split("\n")[0] if text else "—"
+    if not text:
+        return "—"
+    line = text.split("\n")[0].strip().rstrip(".")
+    if len(line) > BRIEF_MAX:
+        line = line[:BRIEF_MAX].rsplit(" ", 1)[0] + "…"
+    return line
 
 
-def _fill(embed, lines):
-    """Add `lines` to `embed`, split across fields at Discord's 1024-char cap."""
-    if not lines:
-        embed.add_field(name=BLANK, value="No commands found.", inline=False)
-        return
-    chunk = ""
+def _label(cmd, slash_names) -> str:
+    """Every way the command can actually be typed.
+
+    A slash-only command has no reachable prefix form, and a hybrid has both --
+    showing only the slash form would hide that `.daily` and `.cd` work. A
+    slash command's aliases are never registered with Discord, so they are only
+    listed when the prefix form is reachable.
+    """
+    prefix_ok = not any("slash_only" in getattr(c, "__qualname__", "")
+                        for c in getattr(cmd, "checks", []))
+    forms = []
+    if cmd.name in slash_names:
+        forms.append(f"`/{cmd.name}`")
+    if prefix_ok:
+        forms.append(f"`.{cmd.name}`")
+        forms += [f"`.{a}`" for a in cmd.aliases]
+    return " ".join(forms) or f"`.{cmd.name}`"
+
+
+def _fill_section(embed, name, lines):
+    """Add `lines` under the field `name`, split at Discord's 1024-char cap."""
+    chunk, first = "", True
     for line in lines:
-        if len(chunk) + len(line) + 2 > 1000:
-            embed.add_field(name=BLANK, value=chunk, inline=False)
-            chunk = ""
-        chunk += line + "\n\n"
+        if len(chunk) + len(line) + 1 > 1000:
+            embed.add_field(name=name if first else BLANK, value=chunk, inline=False)
+            chunk, first = "", False
+        chunk += line + "\n"
     if chunk:
-        embed.add_field(name=BLANK, value=chunk, inline=False)
+        embed.add_field(name=name if first else BLANK, value=chunk, inline=False)
+
 
 
 class HelpCog(commands.Cog):
@@ -54,7 +100,7 @@ class HelpCog(commands.Cog):
     @commands.hybrid_command(name="help", description="List the commands you can use")
     @slash_only()
     async def help(self, ctx):
-        """List the commands available to players.
+        """List the available commands.
 
         Admin commands are deliberately absent. They are prefix-only and never
         appear in the slash picker, so listing them here would only invite
@@ -63,29 +109,34 @@ class HelpCog(commands.Cog):
         """
         await ctx.defer()
 
-        visible = sorted(
-            (c for c in self.bot.commands if not c.hidden and not _is_admin_command(c)),
-            key=lambda c: c.name,
-        )
+        available = {c.name: c for c in self.bot.commands
+                     if not c.hidden and not _is_admin_command(c)}
         slash_names = {c.name for c in self.bot.tree.get_commands()}
 
-        lines = []
-        for cmd in visible:
-            # Show each command the way it is actually invoked. A slash command
-            # has no prefix aliases worth advertising.
-            is_slash = cmd.name in slash_names
-            label = ("/" if is_slash else ".") + cmd.name
-            aliases = ""
-            if cmd.aliases and not is_slash:
-                aliases = "  *(aka " + ", ".join("." + a for a in cmd.aliases) + ")*"
-            lines.append("**`" + label + "`**" + aliases + "\n" + _brief(cmd))
-
         embed = discord.Embed(
-            title="🎵 Grails-Bot commands",
-            description="Everything you can use right now.",
+            title="Grails-Bot commands",
+            description="One line each. `<x>` is required, `[x]` optional.",
             color=discord.Color.blurple(),
         )
-        _fill(embed, lines)
+
+        placed = set()
+        for section, names in HELP_SECTIONS:
+            lines = []
+            for name in names:
+                cmd = available.get(name)
+                if cmd is None:      # renamed or removed since this map was written
+                    continue
+                placed.add(name)
+                lines.append(f"{_label(cmd, slash_names)} — {_brief(cmd)}")
+            if lines:
+                _fill_section(embed, section, lines)
+
+        # Anything the map does not know about, so nothing is ever hidden.
+        leftover = [f"{_label(c, slash_names)} — {_brief(c)}"
+                    for n, c in sorted(available.items()) if n not in placed]
+        if leftover:
+            _fill_section(embed, "More", leftover)
+
         await ctx.send(embed=embed)
 
     @commands.command(name="adminhelp", description="List the admin prefix commands")
@@ -102,19 +153,14 @@ class HelpCog(commands.Cog):
             key=lambda c: c.name,
         )
 
-        lines = []
-        for cmd in admin:
-            aliases = ""
-            if cmd.aliases:
-                aliases = "  *(aka " + ", ".join("." + a for a in cmd.aliases) + ")*"
-            lines.append("**`." + cmd.name + "`**" + aliases + "\n" + _brief(cmd))
+        lines = [f"{_label(cmd, set())} — {_brief(cmd)}" for cmd in admin]
 
         embed = discord.Embed(
             title="🛠️ Admin commands",
             description="Prefix-only, gated behind **grails-admin** or bot owner.",
             color=discord.Color.red(),
         )
-        _fill(embed, lines)
+        _fill_section(embed, BLANK, lines)
         await ctx.send(embed=embed)
 
     @adminhelp.error
@@ -140,9 +186,13 @@ class HelpCog(commands.Cog):
     @slash_only()
     async def guide(self, ctx):
         """Check the bot's guide"""
+        # The glyph sits in the description, not the title: Discord renders no
+        # custom emoji in an embed title, so it would print as raw <:name:id>.
         embed = discord.Embed(
             title="Grails Wiki",
-            description="[Click here to open the official Grails Wiki](https://grails.notion.site/Grails-Official-Wiki-33c461605edc8045b4a4dec8d82fcb93)",
+            description=f"{aesthetics.named_emoji('livvinyl')} "
+                        "[The Official Grails Wiki]"
+                        "(https://grails.notion.site/Grails-Official-Wiki-33c461605edc8045b4a4dec8d82fcb93)",
             color=discord.Color.blurple(),
         )
         await ctx.send(embed=embed)
