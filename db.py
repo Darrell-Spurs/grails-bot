@@ -630,6 +630,41 @@ def get_all_artists():
     conn.close()
     return [row[0] for row in results]  # List of artist names
 
+def get_artist_collected_counts():
+    """{artist_lower: total copies collected server-wide}.
+
+    Counts collection rows, not distinct songs: an artist whose songs have been
+    pulled fifty times between them outranks one with more songs that nobody
+    owns, which is what "most collected" means to a player.
+    """
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("""
+        SELECT songs.artist, COUNT(*)
+        FROM collections
+        JOIN songs ON collections.song_id = songs.id
+        GROUP BY songs.artist
+    """)
+    rows = c.fetchall()
+    conn.close()
+    return {(a or "").lower(): n for a, n in rows}
+
+
+def get_artist_favourite_counts():
+    """{artist_lower: how many players have set them as their favourite}."""
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("""
+        SELECT favorite_artist, COUNT(*)
+        FROM users
+        WHERE favorite_artist IS NOT NULL AND favorite_artist <> ''
+        GROUP BY favorite_artist
+    """)
+    rows = c.fetchall()
+    conn.close()
+    return {(a or "").lower(): n for a, n in rows}
+
+
 def get_artist_overview():
     """Every artist with their album/song counts and up to four cover images.
 

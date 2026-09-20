@@ -44,7 +44,7 @@ class CollectionCog(commands.Cog):
         self.bot = bot
 
     @commands.hybrid_command(
-        name="collection", aliases=["col"],
+        name="collection",
         description="Browse a user's song collection",
     )
     @slash_only()

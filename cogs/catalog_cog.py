@@ -10,6 +10,7 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -123,6 +124,78 @@ class Paginator(discord.ui.View):
         await interaction.response.edit_message(embed=self.render(), view=self)
 
 
+ARTIST_SORTS = {
+    "collected": "Most collected",
+    "alpha": "A–Z",
+    "favorited": "Most favorited",
+}
+
+
+class ArtistsView(Paginator):
+    """The artist list, re-rankable without another database round trip.
+
+    All three orderings are computed from one snapshot taken when the command
+    runs: the counts are two small GROUP BYs, and fetching them once is cheaper
+    than a query per press of the menu.
+    """
+
+    def __init__(self, invoker_id, artists, collected, favorited):
+        self.artists = artists
+        self.collected = collected
+        self.favorited = favorited
+        self.sort = "collected"
+        super().__init__(invoker_id, self._lines(), "Artists Available",
+                         discord.Colour(0x5B4BDB))
+        # Paginator drops its children when there is only one page; the sort
+        # menu has to survive that, since re-ranking is useful either way.
+        self._install_select()
+
+    def _lines(self):
+        if self.sort == "alpha":
+            ranked = sorted(self.artists, key=str.lower)
+            return [f"`{i:>2}` **{a}**" for i, a in enumerate(ranked, 1)]
+
+        counts = self.collected if self.sort == "collected" else self.favorited
+        # Ties break alphabetically so the order is stable between renders.
+        ranked = sorted(self.artists, key=lambda a: (-counts.get(a.lower(), 0), a.lower()))
+
+        lines = []
+        for i, artist in enumerate(ranked, 1):
+            n = counts.get(artist.lower(), 0)
+            if self.sort == "collected":
+                tail = f"{n} cop{'y' if n == 1 else 'ies'}"
+            else:
+                tail = f"{n} {'person' if n == 1 else 'people'}"
+            lines.append(f"`{i:>2}` **{artist}**  ·  {tail}")
+        return lines
+
+    def _install_select(self):
+        select = discord.ui.Select(
+            placeholder=f"Sort: {ARTIST_SORTS[self.sort]}",
+            row=1,
+            options=[discord.SelectOption(label=label, value=key,
+                                          default=(key == self.sort))
+                     for key, label in ARTIST_SORTS.items()],
+        )
+        select.callback = self._on_sort
+        self._sort_select = select
+        self.add_item(select)
+
+    async def _on_sort(self, interaction):
+        self.sort = self._sort_select.values[0]
+        self.page = 0
+        self.lines = self._lines()
+        self.clear_items()
+        # Rebuilding puts the paging buttons back in the right disabled state
+        # for a list whose length has not changed but whose page has reset.
+        if self.pages > 1:
+            self.add_item(self.prev)
+            self.add_item(self.next)
+        self._install_select()
+        await interaction.response.edit_message(embed=self.render(), view=self)
+
+
+
 class CatalogCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -132,18 +205,19 @@ class CatalogCog(commands.Cog):
     @slash_only()
     async def artists(self, ctx):
         await ctx.defer()
-        overview = await self.bot.loop.run_in_executor(None, db.get_artist_overview)
+        overview, collected, favorited = await asyncio.gather(
+            asyncio.to_thread(db.get_artist_overview),
+            asyncio.to_thread(db.get_artist_collected_counts),
+            asyncio.to_thread(db.get_artist_favourite_counts),
+        )
         if not overview:
             await ctx.send("📭 No artists in the pool yet.")
             return
 
-        lines = [
-            f"**{a['artist']}** — {a['song_count']} song{'' if a['song_count'] == 1 else 's'}"
-            f" · {a['album_count']} album{'' if a['album_count'] == 1 else 's'}"
-            for a in overview
-        ]
-        view = Paginator(ctx.author.id, lines, "🎤 Artists in the pool", discord.Colour(0x5B4BDB))
-        view.message = await ctx.send(embed=view.render(), view=view if view.pages > 1 else None)
+        view = ArtistsView(ctx.author.id, [a["artist"] for a in overview],
+                           collected, favorited)
+        # Always attach the view: even on a single page the sort menu is live.
+        view.message = await ctx.send(embed=view.render(), view=view)
 
     # ---- /albums ----------------------------------------------------------
     @commands.hybrid_command(name="albums", description="List an artist's releases in the pool")

@@ -131,7 +131,7 @@ class ProfileCog(commands.Cog):
         return 0, 0, max(xp, 1)
 
     @commands.hybrid_command(
-        name="profile", aliases=["p"],
+        name="profile",
         description="Your collector profile: pinned card, favorites and totals.",
     )
     @slash_only()

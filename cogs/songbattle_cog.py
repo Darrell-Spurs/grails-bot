@@ -60,7 +60,7 @@ class SongBattleCog(commands.Cog):
     def _end_battle(self, channel_id):
         self.active_battles.pop(channel_id, None)
 
-    @commands.hybrid_command(name="songbattle", aliases=["sb"],
+    @commands.hybrid_command(name="songbattle",
                              description="Start a multiplayer song-pull battle (2-5 players)")
     @slash_only()
     @app_commands.describe(rounds=f"First to how many round-wins takes the match? ({MIN_ROUNDS}-{MAX_ROUNDS}, default {DEFAULT_ROUNDS})")
