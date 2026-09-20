@@ -12,9 +12,11 @@ from discord import app_commands
 from discord.ext import commands
 
 from db import (add_song_to_collection, get_user_song_by_details, remove_from_collection,
+                transfer_collection_item, user_exists,
                 get_user_mythic_copy_number, get_user_tradeable_items, get_collection_item_by_id)
 from utils.command_types import slash_only
-from utils.aesthetics import VARIANTS, card_emoji
+from utils.errors import report_unhandled
+from utils.aesthetics import ACCENT_COLOR_INT, VARIANTS, card_emoji
 
 log = logging.getLogger("grails.trade")
 
@@ -117,6 +119,11 @@ class TradeCog(commands.Cog):
             more = f"\n…and {len(matches) - 10} more" if len(matches) > 10 else ""
             return (f"❌ **Multiple `{rarity}` songs{artist_note} match `{item}`** — be more specific, "
                     f"or use `/trade`/`/offer` for autocomplete:\n{options}{more}")
+        if not (item or "").strip():
+            # No item was named, so nothing "matched" -- the user simply owns
+            # none of that variant.
+            return (f"❌ **You don't have any `{rarity}` songs{artist_note} to offer.**\n"
+                    f"Pull some with `.c`, or pick a different rarity.")
         return (f"❌ **You don't have a `{rarity}` song{artist_note} matching `{item}`.**\n"
                 f"Use `/trade` or `/offer` for autocomplete of your collection (with an artist filter "
                 f"if you have a lot of songs).")
@@ -125,6 +132,16 @@ class TradeCog(commands.Cog):
         """Resolve (artist, item) into a collection row, with a prefix-mode fallback: if the
         first word of a free-text song name got mistakenly parsed into `artist` (prefix commands
         have no autocomplete to keep the two apart), retry treating the whole thing as `item`."""
+        # No item named: take the newest card of that variant. Highest collection
+        # id is the most recent -- the column is an identity, so it orders by
+        # insertion without needing collected_at, which only has second
+        # resolution and ties on a fast run of pulls.
+        if not (item or "").strip():
+            owned = await asyncio.to_thread(get_user_tradeable_items, user_id, rarity, artist)
+            if not owned:
+                return None, [], artist
+            return max(owned, key=lambda r: r[0]), [], artist
+
         song_found, matches = await asyncio.to_thread(_find_trade_item, user_id, rarity, item, artist)
         if song_found is None and artist:
             combined = f"{artist} {item}".strip() if item else artist
@@ -139,9 +156,10 @@ class TradeCog(commands.Cog):
     @slash_only()
     @app_commands.describe(user="User to trade with", rarity="Rarity of the song you're offering",
                            artist="Filter to one artist first (handy if you have many songs)",
-                           item="The song to offer (pick from autocomplete)")
+                           item="The song to offer (default: your newest of that rarity)")
     @app_commands.autocomplete(rarity=_rarity_autocomplete, artist=_own_artist_autocomplete, item=_own_item_autocomplete)
-    async def trade(self, ctx, user: discord.Member, rarity: str, *, artist: Optional[str] = None, item: str):
+    async def trade(self, ctx, user: discord.Member, rarity: str, *, artist: Optional[str] = None,
+                    item: Optional[str] = None):
         """Start a trade with another user.
         Usage: .trade @user rarity <song> — or use /trade for autocomplete (+ optional artist filter).
         """
@@ -206,13 +224,82 @@ class TradeCog(commands.Cog):
             embed.set_footer(text="❌ Trade request expired")
             await trade_msg.edit(embed=embed)
 
+    @commands.hybrid_command(name="gift", description="Gift a song to a user")
+    @slash_only()
+    @app_commands.describe(user="Who to gift it to", rarity="Rarity of the song you're gifting",
+                           artist="Filter to one artist first (handy if you have many songs)",
+                           item="The song to gift (default: your newest of that rarity)")
+    @app_commands.autocomplete(rarity=_rarity_autocomplete, artist=_own_artist_autocomplete,
+                               item=_own_item_autocomplete)
+    async def gift(self, ctx, user: discord.Member, rarity: str, *,
+                   artist: Optional[str] = None, item: Optional[str] = None):
+        """Gift a song to a user.
+
+        One-way and immediate -- unlike /trade there is nothing to accept and
+        nothing comes back. Usage: /gift user:<who> rarity:<variant> [item]
+        """
+        rarity = (rarity or "").lower()
+        if rarity not in RARITIES:
+            await ctx.send(f"❌ **Invalid Rarity: `{rarity}`**\n"
+                           f"**Valid Rarities:** {', '.join(f'`{r}`' for r in RARITIES)}")
+            return
+
+        if user.id == ctx.author.id:
+            await ctx.send("❌ **You can't gift to yourself!**")
+            return
+        if user.bot:
+            await ctx.send("❌ **You can't gift to bots!**")
+            return
+        if not await asyncio.to_thread(user_exists, user.id):
+            await ctx.send(f"❌ **{user.display_name}** is not registered yet.")
+            return
+
+        song_found, matches, artist = await self._resolve_trade_item(
+            str(ctx.author.id), rarity, artist, item)
+        if song_found is None:
+            await ctx.send(self._ambiguous_message(rarity, item, matches, artist))
+            return
+
+        collection_id, _song_id, _album_id, song_name, artist_name, variant, album_name = song_found[:7]
+        # Read the display line before the card moves: afterwards the copy
+        # number belongs to the recipient, not the giver.
+        line = self.format_song_display(str(ctx.author.id), song_found, rarity)
+
+        moved = await asyncio.to_thread(
+            transfer_collection_item, collection_id, ctx.author.id, user.id)
+        if not moved:
+            await ctx.send("❌ That card is no longer yours — it may have just been traded away.")
+            return
+
+        embed = discord.Embed(
+            title="Gift sent",
+            description=f"{ctx.author.mention} gifted {user.mention} a card.",
+            colour=discord.Colour(ACCENT_COLOR_INT),
+        )
+        embed.add_field(name="\u200b", value=line, inline=False)
+        embed.set_footer(text="Gifts are one-way and cannot be undone.")
+        await ctx.send(embed=embed)
+        log.info("gift: %s -> %s  %s [%s]", ctx.author, user, song_name, variant)
+
+    @gift.error
+    async def gift_error(self, ctx, error):
+        if isinstance(error, commands.MissingRequiredArgument):
+            await ctx.send("Use `/gift user:<who> rarity:<variant>` — the item defaults "
+                           "to your newest card of that rarity.")
+            return
+        if isinstance(error, (commands.MemberNotFound, commands.BadArgument)):
+            await ctx.send("❌ **Invalid user!** Mention someone with @.")
+            return
+        await report_unhandled(log, ctx, error, command="gift")
+
     @commands.hybrid_command(name="offer", description="Respond to a trade request with your offer")
     @slash_only()
     @app_commands.describe(rarity="Rarity of the song you're offering",
                            artist="Filter to one artist first (handy if you have many songs)",
-                           item="The song to offer (pick from autocomplete)")
+                           item="The song to offer (default: your newest of that rarity)")
     @app_commands.autocomplete(rarity=_rarity_autocomplete, artist=_own_artist_autocomplete, item=_own_item_autocomplete)
-    async def offer(self, ctx, rarity: str, *, artist: Optional[str] = None, item: str):
+    async def offer(self, ctx, rarity: str, *, artist: Optional[str] = None,
+                    item: Optional[str] = None):
         """Respond to a trade request with your offer.
         Usage: .offer rarity <song> — or use /offer for autocomplete (+ optional artist filter).
         """

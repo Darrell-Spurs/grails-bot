@@ -11,7 +11,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from db import (add_song_to_collection, get_song_rarity, get_user_xp, add_user_xp,
+from db import (get_song_rarity, get_user_xp, add_user_xp,
                 user_exists, register_user)
 from utils.helpers import (get_random_song, get_random_album, make_battle_collage,
                            load_square_thumbnail, SOURPATCH_ID)
@@ -22,13 +22,14 @@ log = logging.getLogger("grails.songbattle")
 MAX_PLAYERS = 5
 MIN_PLAYERS = 2
 MIN_ROUNDS = 1
-MAX_ROUNDS = 7
+MAX_ROUNDS = 5
 DEFAULT_ROUNDS = 3
 JOIN_EMOJI = "🎮"
 START_EMOJI = "✅"
 JOIN_TIMEOUT = 45       # seconds to collect players
 VOTE_TIMEOUT = 30       # seconds to collect votes (ends early once every participant has voted)
-VOTE_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+TURN_TIMEOUT = 60       # seconds a player has to pull before the battle is abandoned
+VOTE_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]  # must match MAX_PLAYERS
 
 # Same XP economy as a normal .choice "default" pull, so a battle pull is worth what a
 # real pull would be worth. Duplicated from choice_cog.py's rarity_multiplier rather than
@@ -37,7 +38,7 @@ RARITY_MULTIPLIER = {
     "ultimate": 3, "legendary": 2.5, "elite": 2, "unique": 1.5, "basic": 1
 }
 BASE_PULL_XP = 30
-WINNER_BONUS_XP = 1000
+WINNER_BASE_BONUS_XP = 300
 
 
 def _pull_for_slot():
@@ -50,6 +51,35 @@ def _pull_for_slot():
     return song, song_id, artist, album, rarity, thumb
 
 
+class BattlePullView(discord.ui.View):
+    """The Pull button on the current round's picture.
+
+    Anyone may press it; whoever is not up gets the same "not your turn" reply
+    `.b` gives. The button is a shortcut for the command, not a second code
+    path -- both call the cog's _attempt_pull.
+
+    timeout=None deliberately: the turn clock is the cog's own timer, which both
+    the button and `.b` reset. A View timeout would only notice the button.
+    """
+
+    def __init__(self, cog, channel_id):
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.channel_id = channel_id
+
+    @discord.ui.button(label="Pull", emoji="\U0001F39F\ufe0f",
+                       style=discord.ButtonStyle.primary)
+    async def pull(self, interaction, button):
+        # Deferred without ephemeral so each follow-up can choose for itself:
+        # the pull is news for the channel, a refusal is not.
+        await interaction.response.defer()
+
+        async def reply(text, private=False):
+            await interaction.followup.send(text, ephemeral=private)
+
+        await self.cog._attempt_pull(interaction.user, self.channel_id, reply)
+
+
 class SongBattleCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -58,10 +88,14 @@ class SongBattleCog(commands.Cog):
         self.active_battles = {}
 
     def _end_battle(self, channel_id):
-        self.active_battles.pop(channel_id, None)
+        session = self.active_battles.pop(channel_id, None)
+        if session:
+            # A pending turn timer would otherwise fire against a battle that
+            # is already over.
+            self._cancel_turn_timer(session)
 
     @commands.hybrid_command(name="songbattle",
-                             description="Start a multiplayer song-pull battle (2-5 players)")
+                             description=f"Start a multiplayer song-pull battle ({MIN_PLAYERS}-{MAX_PLAYERS} players)")
     @slash_only()
     @app_commands.describe(rounds=f"First to how many round-wins takes the match? ({MIN_ROUNDS}-{MAX_ROUNDS}, default {DEFAULT_ROUNDS})")
     async def songbattle(self, ctx, rounds: app_commands.Range[int, MIN_ROUNDS, MAX_ROUNDS] = DEFAULT_ROUNDS):
@@ -81,22 +115,38 @@ class SongBattleCog(commands.Cog):
     @commands.command(name="battle", aliases=["b"], description="Pull your song when it's your turn in a Song Battle")
     async def battle_pull(self, ctx):
         """Pull a song for an active Song Battle"""
-        session = self.active_battles.get(ctx.channel.id)
+        async def reply(text, private=False):
+            # `.b` is prefix-only, so Discord offers no ephemeral channel for
+            # it -- everything it says is public either way.
+            await ctx.send(text)
+
+        await self._attempt_pull(ctx.author, ctx.channel.id, reply)
+
+    async def _attempt_pull(self, user, channel_id, reply):
+        """One pull, from either `.b` or the Pull button.
+
+        `reply` sends an ephemeral line back to whoever acted, so the command
+        and the button can answer through their own response objects without
+        this needing to know which it is.
+        """
+        session = self.active_battles.get(channel_id)
         if not session or session.get("phase") != "reveal":
-            await ctx.send("❌ There's no song battle waiting for a pull in this channel! "
-                           "Start one with `/songbattle`.", ephemeral=True)
+            await reply("❌ There's no active song battle in this channel! "
+                        "Start one with `/songbattle`.", private=True)
             return
 
         slots = session["slots"]
         turn = session["turn"]
         current = slots[turn]["member"]
 
-        if ctx.author.id != current.id:
-            await ctx.send(f"❌ It's not your turn! Waiting on **{current.display_name}** to pull.",
-                           ephemeral=True)
+        if user.id != current.id:
+            await reply(f"❌ It's not your turn! Waiting on **{current.display_name}** to pull.",
+                        private=True)
             return
 
-        await ctx.defer(ephemeral=True)
+        # The turn happened, so the abandonment clock stops here and is rearmed
+        # below only if somebody still has to pull.
+        self._cancel_turn_timer(session)
 
         try:
             await self._reveal_pull(slots[turn])
@@ -111,19 +161,21 @@ class SongBattleCog(commands.Cog):
                 await self._update_battle_canvas(
                     session["msg"], slots,
                     title=round_title,
-                    description=f"**{next_player.display_name}**'s turn to pull! Use `.b` or `/b`."
+                    description=f"**{next_player.display_name}**'s turn! "
+                                f"Use `.b` or click the button to pull."
                 )
-            # On the last pull, skip editing the old (possibly scrolled-past) message --
-            # _finish_round resends the fully-revealed picture fresh instead.
+                self._arm_turn_timer(session)
+            # On the last pull, skip editing the old (possibly scrolled-past)
+            # message -- _finish_round resends the revealed picture fresh.
 
-            await ctx.send(f"🎟️ {ctx.author.display_name} pulled **{pulled_song}** by **{pulled_artist}**!", ephemeral=True)
+            await reply(f"🎟️ **{user.display_name}** pulled **{pulled_song}** by **{pulled_artist}**!")
 
             if is_last:
                 await self._finish_round(session)
         except discord.HTTPException:
-            log.exception("Song battle pull failed in channel %s", ctx.channel.id)
-            await ctx.send("❌ Something went wrong. The battle has been cancelled.", ephemeral=True)
-            self._end_battle(ctx.channel.id)
+            log.exception("Song battle pull failed in channel %s", channel_id)
+            await reply("❌ Something went wrong. The battle has been cancelled.", private=True)
+            self._end_battle(channel_id)
 
     async def _run_battle(self, ctx, rounds):
         self.active_battles[ctx.channel.id] = {"phase": "lobby"}
@@ -156,7 +208,9 @@ class SongBattleCog(commands.Cog):
         }
 
         try:
-            session["msg"] = await self._send_battle_canvas(session)
+            session["msg"] = await self._send_battle_canvas(
+                session, view=BattlePullView(self, ctx.channel.id))
+            self._arm_turn_timer(session)
         except discord.HTTPException:
             log.exception("Failed to send battle canvas in channel %s", ctx.channel.id)
             await ctx.send("❌ Something went wrong starting the song battle. Please try again.")
@@ -176,7 +230,7 @@ class SongBattleCog(commands.Cog):
 
     async def _lobby_phase(self, ctx, rounds):
         embed = discord.Embed(
-            title="🎵 Song Battle!",
+            title="Song Battle! ",
             description=(f"React with {JOIN_EMOJI} to join! ({MIN_PLAYERS}-{MAX_PLAYERS} players)\n"
                         f"**First to {rounds} win{'s' if rounds != 1 else ''} takes the match.**\n"
                         f"Starting in {JOIN_TIMEOUT}s or when full.\n"
@@ -234,7 +288,7 @@ class SongBattleCog(commands.Cog):
 
         if len(players) < MIN_PLAYERS:
             embed.title = "❌ Song Battle Cancelled"
-            embed.description = f"Not enough players joined (need at least {MIN_PLAYERS})."
+            embed.description = f"Not enough players joined 💔"
             embed.color = discord.Color.red()
             await msg.edit(embed=embed)
             return None
@@ -253,7 +307,48 @@ class SongBattleCog(commands.Cog):
 
     # ---- battle canvas ----
 
-    async def _send_battle_canvas(self, session, title=None, description=None):
+    # ---- turn clock ----
+    def _cancel_turn_timer(self, session):
+        task = session.pop("turn_timer", None)
+        if task and not task.done():
+            task.cancel()
+
+    def _arm_turn_timer(self, session):
+        """Abandon the battle if the player whose turn it is never pulls.
+
+        A battle holds the channel's only slot, so one player walking away used
+        to block every future battle there until the bot restarted. Armed on the
+        cog rather than on the View's timeout because `.b` is a prefix command:
+        a View only sees its own button, and would expire a battle that was
+        being played perfectly well through the command.
+        """
+        self._cancel_turn_timer(session)
+
+        async def expire():
+            try:
+                await asyncio.sleep(TURN_TIMEOUT)
+            except asyncio.CancelledError:
+                return
+            # Still the same turn, so nobody acted.
+            if self.active_battles.get(session["ctx"].channel.id) is not session:
+                return
+            waiting = session["slots"][session["turn"]]["member"]
+            self._end_battle(session["ctx"].channel.id)
+            try:
+                await self._update_battle_canvas(
+                    session["msg"], session["slots"],
+                    title="Song Battle — abandoned",
+                    description=f"**{waiting.display_name}** did not pull within "
+                                f"{TURN_TIMEOUT} seconds. Start another with `/songbattle`.")
+                await session["msg"].edit(view=None)
+            except discord.HTTPException:
+                log.debug("could not mark the battle abandoned")
+            log.info("Song battle in %s abandoned: %s did not pull",
+                     session["ctx"].channel.id, waiting)
+
+        session["turn_timer"] = asyncio.create_task(expire())
+
+    async def _send_battle_canvas(self, session, title=None, description=None, view=None):
         """Post the current battle picture as a brand-new message. Used both to start a round
         (blank slots) and to resend the fully-revealed picture fresh right before voting, so it
         isn't scrolled off-screen by all of that round's `.b` messages."""
@@ -263,11 +358,12 @@ class SongBattleCog(commands.Cog):
             title = f"🎶 Song Battle — Round {session['round_num']}"
         if description is None:
             first_player = slots[0]["member"]
-            description = f"**{first_player.display_name}**'s turn to pull! Use `.b` or `/b`."
+            description = (f"**{first_player.display_name}**'s turn! "
+                           f"Use `.b` or click the button to pull.")
         embed = discord.Embed(title=title, description=description, color=discord.Color.blurple())
         embed.set_image(url="attachment://battle.png")
         file = discord.File(buf, filename="battle.png")
-        return await session["ctx"].send(embed=embed, file=file)
+        return await session["ctx"].send(embed=embed, file=file, view=view)
 
     async def _update_battle_canvas(self, msg, slots, title=None, description=None):
         buf = await asyncio.to_thread(make_battle_collage, slots, None, True)
@@ -293,11 +389,11 @@ class SongBattleCog(commands.Cog):
     async def _voting_phase(self, msg, slots):
         emojis = VOTE_EMOJIS[:len(slots)]
         participant_ids = {s["member"].id for s in slots}
-        options = "\n".join(f"{emojis[i]} {s['name']} — {s['song']} ({s['artist']})" for i, s in enumerate(slots))
+        options = "\n".join(f"{emojis[i]} **{s['song']}** - {s['artist']}" for i, s in enumerate(slots))
         await self._update_battle_canvas(
             msg, slots,
             title="🗳️ Vote for the Best Pull!",
-            description=(f"Players react with a number below! Voting ends in {VOTE_TIMEOUT}s "
+            description=(f"React with a number below! Voting ends in {VOTE_TIMEOUT}s "
                         f"\n\n{options}")
         )
         for e in emojis:
@@ -330,8 +426,8 @@ class SongBattleCog(commands.Cog):
 
         embed = msg.embeds[0]
         if not votes:
-            embed.title = "🤷 No Votes Cast"
-            embed.description = "Nobody voted — no winner this round. (Everyone still keeps their pull!)"
+            embed.title = "🥺 No Votes Cast"
+            embed.description = "Nobody voted — no winner this round."
             await msg.edit(embed=embed)
             return []
 
@@ -339,12 +435,12 @@ class SongBattleCog(commands.Cog):
         top_count = max(tally.values())
         winner_indices = [i for i, count in tally.items() if count == top_count]
 
-        lines = [f"{emojis[i]} **{s['name']}** — {tally.get(i, 0)} vote(s)" for i, s in enumerate(slots)]
+        lines = [f"{emojis[i]} **{s['song']}** - {s['artist']} — {tally.get(i, 0)} vote{'' if tally.get(i, 0) == 1 else 's'}" for i, s in enumerate(slots)]
         if len(winner_indices) == 1:
             embed.title = f"🏆 {slots[winner_indices[0]]['name']} Wins the Round!"
         else:
             names = ", ".join(slots[i]['name'] for i in winner_indices)
-            embed.title = f"🤝 Round Tied! ({names})"
+            embed.title = f"🤝 Round Tied!"
         embed.description = "\n".join(lines)
         await msg.edit(embed=embed)
         return winner_indices
@@ -360,15 +456,27 @@ class SongBattleCog(commands.Cog):
         slots = session["slots"]
         round_title = f"🎶 Song Battle — Round {session['round_num']}"
 
+        # The round's own message has been edited in place through every `.b`,
+        # and the reveal below is a fresh message so nobody has to scroll back.
+        # Without deleting the old one the channel ends up with two copies of
+        # the same fully-revealed picture.
+        stale = session.get("msg")
         session["msg"] = await self._send_battle_canvas(
             session,
             title=f"{round_title} — All Pulls Revealed!",
             description="Vote for the best pull below! 👇"
         )
+        if stale is not None:
+            try:
+                await stale.delete()
+            except discord.HTTPException:
+                # Already gone, or the bot cannot manage messages here. Not
+                # worth failing the round over.
+                log.debug("could not delete the previous round message")
 
         winner_indices = await self._voting_phase(session["msg"], slots)
 
-        # Everyone keeps their pull every round, win or lose.
+        # XP only -- battle pulls are not added to anyone's collection.
         await self._grant_round_pulls(ctx, slots)
 
         if len(winner_indices) == 1:
@@ -389,41 +497,45 @@ class SongBattleCog(commands.Cog):
         session["round_num"] += 1
         session["turn"] = 0
         session["slots"] = self._make_slots(session["players"])
-        session["msg"] = await self._send_battle_canvas(session)
+        session["msg"] = await self._send_battle_canvas(
+            session, view=BattlePullView(self, ctx.channel.id))
+        self._arm_turn_timer(session)
 
     async def _send_score_tally(self, session, slots, winner_indices):
         players = session["players"]
         scores = session["scores"]
-        score_lines = "\n".join(f"{p.display_name}: {scores.get(p.id, 0)}" for p in players)
+        score_lines = "\n".join(f"**{p.display_name}**: {'🎯' * scores.get(p.id, 0) + '⚫' * (session["rounds_target"] - scores.get(p.id, 0))}" for p in players)
 
         if len(winner_indices) == 1:
             winner = slots[winner_indices[0]]
-            header = (f"🏅 {winner['name']} won the round with "
+            header = (f"🎉 {winner['name']} won the round with "
                       f"**{winner['song']}** by **{winner['artist']}**!!")
         elif len(winner_indices) > 1:
             names = ", ".join(slots[i]['name'] for i in winner_indices)
-            header = f"🤝 The round was tied between {names}!"
+            header = f"🤝 The roundf was tied between {names}!"
         else:
-            header = "🤷 Nobody voted this round!"
+            header = "🥺 Nobody voted this round!"
 
         embed = discord.Embed(
             title=header,
-            description=f"🔢 Current Score:\n{score_lines}",
+            description=f"**Current Score**:\n{score_lines}",
             color=discord.Color.blurple()
         )
         await session["ctx"].send(embed=embed)
 
     async def _grant_round_pulls(self, ctx, slots):
-        """Add every puller's song to their collection and grant XP for it -- independent of
-        who won the round, matching the 'everyone keeps their pull' rule from a single-round battle."""
+        """Grant XP for each pull. The songs themselves are not kept.
+
+        A battle pull used to be added to the puller's collection, which made a
+        battle a faster way to farm cards than the drop economy it is supposed
+        to sit alongside. XP still lands, so playing is worth something.
+        """
         xp_cog = self.bot.get_cog('XPCog')
 
         for slot in slots:
             member = slot["member"]
             if slot["song_id"] == SOURPATCH_ID:
                 continue
-
-            add_song_to_collection(member.id, slot["song_id"], slot["album_id"], variant="default")
 
             level_checkpoint = None
             if xp_cog:
@@ -442,33 +554,34 @@ class SongBattleCog(commands.Cog):
         players = session["players"]
         scores = session["scores"]
         xp_cog = self.bot.get_cog('XPCog')
+        winner_xp = WINNER_BASE_BONUS_XP * session["rounds_target"]
 
         for uid in match_winner_ids:
             member = discord.utils.get(players, id=uid)
             level_checkpoint = None
             if xp_cog:
                 level_checkpoint = xp_cog.get_level_from_xp(get_user_xp(uid))
-            add_user_xp(uid, WINNER_BONUS_XP)
+            add_user_xp(uid, winner_xp)
             if xp_cog and level_checkpoint is not None:
                 await xp_cog.check_level_up(uid, level_checkpoint, ctx.channel, member)
 
         ranked = sorted(players, key=lambda p: scores.get(p.id, 0), reverse=True)
         medals = ["🥇", "🥈", "🥉"]
         scoreboard = "\n".join(
-            f"{medals[i] if i < len(medals) else ''} {p.display_name} - {scores.get(p.id, 0)}".strip()
+            f"{medals[i] if i < len(medals) else ''} **{p.display_name}**: {scores.get(p.id, 0)}".strip()
             for i, p in enumerate(ranked)
         )
 
         if len(match_winner_ids) == 1:
             winner = discord.utils.get(players, id=match_winner_ids[0])
-            title = f"🏆 {winner.display_name} Wins the Match!"
+            title = f"🏆 **{winner.display_name}** Wins the Game!"
         else:
             names = ", ".join(discord.utils.get(players, id=uid).display_name for uid in match_winner_ids)
-            title = f"🤝 Match Tied Between {names}!"
+            title = f"🤝 Match Tied Between **{names}**!"
 
         embed = discord.Embed(
             title=title,
-            description=f"Final Score:\n{scoreboard}\n\n+{WINNER_BONUS_XP} bonus XP for the winner!",
+            description=f"Final Score:\n{scoreboard}\n\n+{winner_xp} bonus XP for **{winner.display_name}**!",
             color=discord.Color.gold()
         )
         await ctx.send(embed=embed)

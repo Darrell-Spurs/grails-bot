@@ -28,11 +28,11 @@ BRIEF_MAX = 72
 # otherwise let a newly added command silently never show up in /help.
 HELP_SECTIONS = (
     ("Drops", ("choice", "sigvinyl", "vinyl", "cooldown")),
-    ("Trading", ("trade", "offer", "canceltrade")),
+    ("Trading", ("trade", "offer", "canceltrade", "gift")),
     ("Your account", ("register", "collection", "profile", "view", "xp",
                       "daily", "vinylcheck")),
     ("Catalogue", ("artists", "albums", "songs", "mythiccheck")),
-    ("Games", ("songbattle", "battle", "top")),
+    ("Games", ("songbattle", "battle", "leaderboard")),
     ("Help", ("help", "xphelp", "guide", "ping")),
 )
 

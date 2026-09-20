@@ -18,8 +18,6 @@ from utils.aesthetics import named_emoji, rarity_emoji, variant_emoji, card_emoj
 
 log = logging.getLogger("grails.xp")
 
-NL = chr(10)
-
 
 class XPCog(commands.Cog):
 
@@ -180,10 +178,10 @@ class XPCog(commands.Cog):
 
         await ctx.send(embed=embed)
 
-    @commands.hybrid_command(name="top", description="The XP leaderboard")
+    @commands.hybrid_command(name="leaderboard", description="The XP leaderboard")
     @slash_only()
     @app_commands.describe(count="How many players to show (1-25, default 10)")
-    async def top(self, ctx, count: int = 10):
+    async def leaderboard(self, ctx, count: int = 10):
         """Show the XP leaderboard.
 
         Your own standing is appended when you are not already on the page, so
@@ -204,14 +202,13 @@ class XPCog(commands.Cog):
             # the user is still in the server.
             member = ctx.guild.get_member(int(user_id)) if ctx.guild else None
             name = member.display_name if member else (username or f"User {user_id}")
-            marker = medals.get(place, f"`#{place:>2}`")
-            you = "  ←  you" if str(user_id) == str(ctx.author.id) else ""
-            lines.append(f"{marker} **{name}** — `{xp:,}` XP · Lv `{self.get_level_from_xp(xp)}`{you}")
+            marker = medals.get(place, f"`{place:>2}`")
+            lines.append(f"{marker} **{name}** — `{xp:,}` XP · Lv `{self.get_level_from_xp(xp)}`")
 
         embed = discord.Embed(
-            title="🏆 XP leaderboard",
-            description=NL.join(lines),
-            colour=discord.Colour(aesthetics.ACCENT_COLOR),
+            title="XP leaderboard",
+            description="\n".join(lines),
+            colour=discord.Colour(aesthetics.ACCENT_COLOR_INT),
         )
 
         shown = {str(r[0]) for r in rows}
@@ -228,12 +225,12 @@ class XPCog(commands.Cog):
                 )
         await ctx.send(embed=embed)
 
-    @top.error
-    async def top_error(self, ctx, error):
+    @leaderboard.error
+    async def leaderboard_error(self, ctx, error):
         if isinstance(error, commands.BadArgument):
             await ctx.send("`count` has to be a number between 1 and 25.")
             return
-        await report_unhandled(log, ctx, error, command="top")
+        await report_unhandled(log, ctx, error, command="leaderboard")
 
     @commands.hybrid_command(name="xphelp", description="How XP, levels and vinyl rewards work")
     @slash_only()

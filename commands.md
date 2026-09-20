@@ -37,6 +37,7 @@ You bank one drop every **3 minutes**, up to **20**.
 | `/trade` | `<user> <rarity> [artist] <item>` | slash only | Offer one of your cards to another player |
 | `/offer` | `<rarity> [artist] <item>` | slash only | Answer an open trade with a card of your own |
 | `/canceltrade` | — | slash only | Withdraw your pending trade |
+| `/gift` | `<user> <rarity> [artist] [item]` | slash only | Give a card away outright — one-way, nothing comes back |
 
 Slash-only so the card arguments come with autocomplete — `artist` narrows the
 `item` list, which matters once a collection gets large.
@@ -79,7 +80,7 @@ Registration is required before anything else — there is no automatic sign-up.
 |---|---|---|---|
 | `/songbattle` | `[rounds]` | slash only | Multi-round song battle |
 | `.battle` | — | prefix only (`.b`) | Quick single battle |
-| `/top` | `[count]` | slash only | XP leaderboard, 1–25, with your own rank |
+| `/leaderboard` | `[count]` | slash only | XP leaderboard, 1–25, with your own rank |
 
 ---
 

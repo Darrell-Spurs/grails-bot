@@ -1140,6 +1140,29 @@ def get_collection_item_by_id(collection_id, user_id):
     conn.close()
     return result
 
+def transfer_collection_item(collection_id, from_user_id, to_user_id):
+    """Move one card between players. True if it moved, False if it was not theirs.
+
+    Reassigns the existing row rather than deleting and re-inserting it. The row
+    id and collected_at are what decide a mythic's copy number, so a
+    delete-then-insert would silently renumber it -- copy #1 could become #3
+    just by being gifted.
+
+    The WHERE clause carries the old owner, so a stale id cannot move somebody
+    else's card.
+    """
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("""
+        UPDATE collections SET user_id = ?
+        WHERE id = ? AND user_id = ?
+    """, (_uid(to_user_id), collection_id, _uid(from_user_id)))
+    moved = c.rowcount > 0
+    conn.commit()
+    conn.close()
+    return moved
+
+
 def remove_from_collection(user_id, song_id, album_id, variant):
     """Remove a specific item from user's collection"""
     user_id = _uid(user_id)

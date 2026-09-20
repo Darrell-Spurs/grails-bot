@@ -12,10 +12,11 @@ from discord.ext import commands
 
 import db
 from utils.collection_ui import (
-    RARITY_ORDER, CardView, CollectionView, build_card_embed, card_emoji, rarity_emoji,
+    CardView, CollectionView, build_card_embed, card_emoji, rarity_emoji,
     rarity_colour,
 )
 from utils.command_types import slash_only
+from utils import aesthetics
 
 log = logging.getLogger("grails.profile")
 
@@ -33,13 +34,17 @@ class ProfileView(discord.ui.View):
     """Profile actions. Setting a pin or a favorite is owner-only; anyone
     looking at the profile can still jump to the collection."""
 
-    def __init__(self, invoker_id, owner_id, owner_name, pinned_card):
+    def __init__(self, invoker_id, owner_id, owner_name, pinned_card, reopen=None):
         super().__init__(timeout=180)
         self.invoker_id = int(invoker_id)
         self.owner_id = str(owner_id)
         self.owner_name = owner_name
         self.pinned_card = pinned_card
         self.message = None
+        # Rebuilds this profile from scratch. Passed to the views this one
+        # opens so their Back button lands on a *fresh* profile -- pinning a
+        # card and coming back should show the new pin, not a stale snapshot.
+        self.reopen = reopen
 
         if str(invoker_id) != self.owner_id:
             self.remove_item(self.set_favorite)
@@ -66,7 +71,8 @@ class ProfileView(discord.ui.View):
                        style=discord.ButtonStyle.primary, row=0)
     async def open_pinned(self, interaction, button):
         card = self.pinned_card
-        view = CardView(self.invoker_id, card, self.owner_name, owner_id=self.owner_id)
+        view = CardView(self.invoker_id, card, self.owner_name, owner_id=self.owner_id,
+                        back_to=self.reopen)
         view.message = self.message
         embed = build_card_embed(
             card, self.owner_name,
@@ -78,7 +84,8 @@ class ProfileView(discord.ui.View):
 
     @discord.ui.button(label="Collection", style=discord.ButtonStyle.secondary, row=0)
     async def open_collection(self, interaction, button):
-        view = CollectionView(self.invoker_id, self.owner_id, self.owner_name)
+        view = CollectionView(self.invoker_id, self.owner_id, self.owner_name,
+                              back_to=self.reopen)
         view.message = self.message
         if not view.total:
             await interaction.response.send_message("That collection is empty.", ephemeral=True)
@@ -130,36 +137,34 @@ class ProfileCog(commands.Cog):
             return level, floor, ceiling
         return 0, 0, max(xp, 1)
 
-    @commands.hybrid_command(
-        name="profile",
-        description="View a player's profile.",
-    )
-    @slash_only()
-    @app_commands.describe(user="Whose profile to show (defaults to you)")
-    async def profile(self, ctx, user: Optional[discord.User] = None):
-        owner = user or ctx.author
-        data = db.get_user_profile(owner.id)
+    def _build_profile(self, owner_id, owner_name, avatar_url, invoker_id):
+        """Build the profile embed, or None when the user is not registered.
+
+        Pulled out of the command so the Back buttons on the collection and
+        the pinned card can rebuild the exact same view. Returning it rather
+        than sending means one definition serves the first render and every
+        return trip.
+        """
+        data = db.get_user_profile(owner_id)
 
         if not data:
-            who = "You are" if owner.id == ctx.author.id else f"{owner.display_name} is"
-            await ctx.send(f"{who} not registered yet — run `.register` to start collecting.")
-            return
+            return None
 
         pinned = None
         if data["pinned_collection_id"]:
             # Resolved with an ownership check: a pinned card that was traded
             # away must not keep showing on the old owner's profile.
-            pinned = db.get_card(data["pinned_collection_id"], user_id=owner.id)
+            pinned = db.get_card(data["pinned_collection_id"], user_id=owner_id)
             if pinned is None:
-                db.clear_pinned_card(owner.id)
+                db.clear_pinned_card(owner_id)
 
         level, floor, ceiling = self._level(data["xp"])
         into = data["xp"] - floor
         span = max(ceiling - floor, 1)
 
         colour = rarity_colour(pinned["rarity"]) if pinned else discord.Colour(0x5B4BDB)
-        embed = discord.Embed(title=f"\U0001F3A7 {owner.display_name}", colour=colour)
-        embed.set_thumbnail(url=owner.display_avatar.url)
+        embed = discord.Embed(title=f"", colour=colour)
+        embed.set_author(name=owner_name + "’s Profile", icon_url=avatar_url)
 
         if pinned:
             variant = (pinned["variant"] or "default").lower()
@@ -185,53 +190,61 @@ class ProfileCog(commands.Cog):
 
         embed.add_field(
             name=f"Level {level}",
-            value=f"`{_bar(into, span)}` {data['xp']:,} XP\n{max(ceiling - data['xp'], 0):,} to next level",
+            value=f"`{_bar(into, span)}` {data['xp']:,} XP",
             inline=False,
         )
 
         embed.add_field(
             name="Collection",
-            value=(f"**{data['cards']}** cards · **{data['unique_songs']}** unique songs\n"
-                   f"\U0001F48E **{data['mythics']}** mythics"),
-            inline=True,
-        )
-
-        spread = " ".join(
-            f"{rarity_emoji(r)}{data['rarity_counts'][r]}"
-            for r in RARITY_ORDER if data["rarity_counts"].get(r)
-        )
-        embed.add_field(name="Rarity spread", value=spread or "—", inline=True)
-
-        embed.add_field(
-            name="Pulls available",
-            value=f"\U0001F4BF {data['vinyl_count']} · \U0001F58B️ {data['sig_vinyl_count']}",
+            value=(f"**{data['unique_songs']}** unique songs, {aesthetics.variant_emoji('mythic')} **{data['mythics']}** mythics"),
             inline=True,
         )
 
         # Chosen vs earned: the pair is the interesting part of a profile.
         favorite = data["favorite_artist"]
         if favorite:
-            owned, total = db.get_artist_completion(owner.id, favorite)
+            owned, total = db.get_artist_completion(owner_id, favorite)
             embed.add_field(
-                name="❤ Favorite artist",
+                name="Favorite artist",
                 value=f"**{favorite}**\n`{_bar(owned, total)}` {owned}/{total} collected",
                 inline=True,
             )
         else:
-            embed.add_field(name="❤ Favorite artist", value="_Not set_", inline=True)
-
-        if data["top_artist"]:
-            owned, total = db.get_artist_completion(owner.id, data["top_artist"])
-            embed.add_field(
-                name="\U0001F3C6 Most collected",
-                value=f"**{data['top_artist']}**\n`{_bar(owned, total)}` {owned}/{total} collected",
-                inline=True,
-            )
+            embed.add_field(name="Favorite artist", value="_Not set_", inline=True)
 
         if data["collecting_since"]:
             embed.set_footer(text=f"Collecting since {str(data['collecting_since'])[:10]}")
 
-        view = ProfileView(ctx.author.id, owner.id, owner.display_name, pinned)
+        return embed, pinned
+
+    @commands.hybrid_command(
+        name="profile",
+        description="View a player's profile.",
+    )
+    @slash_only()
+    @app_commands.describe(user="Whose profile to show (defaults to you)")
+    async def profile(self, ctx, user: Optional[discord.User] = None):
+        owner = user or ctx.author
+        built = self._build_profile(owner.id, owner.display_name,
+                                    owner.display_avatar.url, ctx.author.id)
+        if built is None:
+            who = "You are" if owner.id == ctx.author.id else f"{owner.display_name} is"
+            await ctx.send(f"{who} not registered yet — run `.register` to start collecting.")
+            return
+        embed, pinned = built
+        def reopen():
+            """Rebuild the profile view for a Back button."""
+            fresh = self._build_profile(owner.id, owner.display_name,
+                                        owner.display_avatar.url, ctx.author.id)
+            if fresh is None:
+                return None
+            new_embed, new_pinned = fresh
+            back = ProfileView(ctx.author.id, owner.id, owner.display_name,
+                               new_pinned, reopen=reopen)
+            return new_embed, back
+
+        view = ProfileView(ctx.author.id, owner.id, owner.display_name, pinned,
+                           reopen=reopen)
         view.message = await ctx.send(embed=embed, view=view)
 
 

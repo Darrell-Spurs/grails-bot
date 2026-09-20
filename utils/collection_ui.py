@@ -166,6 +166,7 @@ class _OwnerView(discord.ui.View):
         super().__init__(timeout=timeout)
         self.invoker_id = int(invoker_id)
         self.message = None
+        self.back_to = None
 
     async def interaction_check(self, interaction):
         if interaction.user.id != self.invoker_id:
@@ -185,12 +186,32 @@ class _OwnerView(discord.ui.View):
             except discord.HTTPException:
                 pass
 
+    # Defined on the base so the collection list and a single card share one
+    # implementation. Subclasses that are not reached from a profile drop it in
+    # __init__, so it only ever appears when there is somewhere to go back to.
+    @discord.ui.button(label="Back to profile", emoji="↩",
+                       style=discord.ButtonStyle.secondary, row=4)
+    async def back_to_profile(self, interaction, button):
+        rebuilt = self.back_to() if self.back_to else None
+        if rebuilt is None:
+            await interaction.response.send_message(
+                "That profile is no longer available.", ephemeral=True)
+            return
+        embed, view = rebuilt
+        view.message = self.message
+        await interaction.response.edit_message(embed=embed, view=view)
+
 
 class CardView(_OwnerView):
     """A single card, with the actions that make sense for who is looking."""
 
-    def __init__(self, invoker_id, card, owner_name, *, origin=None, owner_id=None):
+    def __init__(self, invoker_id, card, owner_name, *, origin=None, owner_id=None,
+                 back_to=None):
         super().__init__(invoker_id)
+        # `back_to` is the profile this card was opened from; `origin` is a
+        # collection page. A card reached through the collection keeps the
+        # collection's own Back, so only one of the two is ever in play.
+        self.back_to = back_to
         self.card = card
         self.owner_name = owner_name
         self.owner_id = str(owner_id if owner_id is not None else card["user_id"])
@@ -202,6 +223,8 @@ class CardView(_OwnerView):
 
         if origin is None:
             self.remove_item(self.back)
+        if back_to is None:
+            self.remove_item(self.back_to_profile)
         if not is_owner:
             self.remove_item(self.trade_this)
             self.remove_item(self.pin_card)
@@ -272,8 +295,11 @@ class CollectionView(_OwnerView):
         return True
 
     def __init__(self, invoker_id, owner_id, owner_name, *, variant=None,
-                 artist=None, sort="variant"):
+                 artist=None, sort="variant", back_to=None):
         super().__init__(invoker_id)
+        # A callable returning (embed, view) for whatever opened this list, or
+        # None when /collection was run directly and there is nowhere to go.
+        self.back_to = back_to
         self.owner_id = str(owner_id)
         self.owner_name = owner_name
         self.variant = variant
@@ -282,6 +308,8 @@ class CollectionView(_OwnerView):
         self.page = 0
         self.all_cards = []
         self.reload()
+        if back_to is None:
+            self.remove_item(self.back_to_profile)
 
     # ---- data ----------------------------------------------------------
     def reload(self):
