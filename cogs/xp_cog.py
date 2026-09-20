@@ -14,7 +14,7 @@ from utils.errors import report_unhandled
 from utils.vinyl import vinyl_gif_sig_art_from_url, vinyl_static_bytes
 import logging
 from utils.command_types import slash_only
-from utils.aesthetics import named_emoji, card_emoji
+from utils.aesthetics import named_emoji, rarity_emoji, variant_emoji, card_emoji
 
 log = logging.getLogger("grails.xp")
 
@@ -102,19 +102,6 @@ class XPCog(commands.Cog):
             20: "🎵 20x Vinyl Pulls + Diamond Collector Badge + VIP Access",
             25: "🎵 25x Vinyl Pulls + Legendary Collector Badge + All Perks"
         }
-
-        # Default reward for levels not specifically defined
-        if level not in rewards:
-            if level < 5:
-                return f"🎵 {level}x Vinyl Pulls + Progress Badge"
-            elif level < 10:
-                return f"🎵 {level}x Vinyl Pulls + Advanced Badge"
-            elif level < 20:
-                return f"🎵 {level}x Vinyl Pulls + Master Badge + Special Perk"
-            else:
-                return f"🎵 {level}x Vinyl Pulls + Elite Badge + Premium Perks"
-
-        return rewards[level]
 
     async def check_level_up(self, user_id, level_checkpoint, channel, user=None):
         xp_ = get_user_xp(user_id)
@@ -253,53 +240,37 @@ class XPCog(commands.Cog):
     async def xphelp(self, ctx):
         """Explain how XP, levelling and vinyl rewards work"""
         embed = discord.Embed(
-            title="🎁 Level Rewards",
-            description="Here are the rewards you can earn by leveling up!",
+            title="How XP works",
+            description="Claim a card and you earn its **Base XP** x **Rarity Multiplier**.",
             color=discord.Color.teal())
-        # Show rewards for key levels
-        # key_levels = [1, 2, 3, 5, 10, 15, 20, 25]
-        # for level in key_levels:
-        #     reward = self.get_level_rewards(level)
-        #     xp_needed = self.get_xp_for_level(level)
-        #     embed.add_field(
-        #         name=f"Level {level} ({xp_needed:,} XP)",
-        #         value=reward,
-        #         inline=False
-        #     )
+
+        # Both rows are generated from utils/odds.py rather than written out, so
+        # the help can never quote numbers the game does not actually pay. It
+        # used to promise 10/50/200/800 against a real 30/100/500/1200.
+        base = " · ".join(
+            f"{variant_emoji(v)} **{xp:,}**" for v, xp in odds.VARIANT_XP.items())
+        mult = " · ".join(
+            f"{rarity_emoji(r)} **x{m:g}**"
+            for r, m in sorted(odds.RARITY_XP_MULTIPLIER.items(),
+                               key=lambda kv: -kv[1]))
+
+        embed.add_field(name="Base XP by variant", value=base, inline=False)
+        embed.add_field(name="Rarity multiplier", value=mult, inline=False)
 
         embed.add_field(
-            name="🎉 Level Rewards Overview",
-            value="- Each level requires 500 more XP than the previous one.\n"
-                  "- You earns a vinyl pull for every level you reach!\n"
-                  "- Tere are also special rewards on certain levels *(coming soon)*"
-        )
+            name="Other ways to earn",
+            value=f"Daily reward **{odds.DAILY_XP_MIN:,} - {odds.DAILY_XP_MAX:,}**XP with `.daily`\n"
+                  f"Events may be *coming soon* 👀\n",
+            inline=False)
 
         embed.add_field(
-            name="💡 How to Earn XP",
-            value=
-            "- ⚪️ Claim a default song: **10xp** \n" \
-            "- 🧩 Claim a glitched song: **50xp**\n" \
-            "- ✏️ Claim a sketch song: **200xp**\n" \
-            "- 💎 Claim a mythic song: **800xp**\n" \
-            "- 📅 Claim a daily reward: **100-1000xp**\n" \
-            "- 🚩 Participate in events: **Coming Soon!**",
-            inline=False
-        )
+            name="Levelling",
+            value="Each level costs **500 XP** more than the last level.\n"
+                  f"Leveling up gives you 1 vinyl {variant_emoji('vinyl')} pull.\n"
+                  f"Gain a signature vinyl {variant_emoji('sig_vinyl')} every 5 levels.\n",
+            inline=False)
 
-        embed.add_field(
-            name="🔍 Rarity Multipliers",
-            value=
-            "You get a higher XP reward for claiming rarer songs:\n"
-            "- 🪐 Ultimate: **x3** \n" \
-            "- 🏆 Legendary: **x2.5**\n" \
-            "- ⭐ Elite: **x2**\n" \
-            "- 🔮 Unique: **x1.5**\n" \
-            "- 📄 Basic: **x1**\n",
-            inline=False
-        )
-        
-        embed.set_footer(
-            text="Use .vinyl to claim your vinyls \nUse .vinylcheck to check your remaining vinyls claims!")
+        embed.set_footer(text="/xp for your progress · /vinylcheck for your vinyl inventory")
         await ctx.send(embed=embed)
 
 

@@ -67,6 +67,33 @@ RARITY_RATES = {
 from utils.aesthetics import RARITY_ORDER  # noqa: E402,F401
 
 
+# --- XP awarded for claiming a card ------------------------------------------
+# Final award = VARIANT_XP[variant] * RARITY_XP_MULTIPLIER[rarity].
+#
+# These used to live in choice_cog while /xphelp restated them by hand, and the
+# two had drifted: the help promised 10/50/200/800 against the real
+# 30/100/500/1200. Keeping one copy here means the help reads the same numbers
+# the game pays out.
+
+VARIANT_XP = {
+    "mythic": 1200,
+    "sketch": 500,
+    "glitched": 100,
+    "default": 30,
+}
+
+RARITY_XP_MULTIPLIER = {
+    "ultimate": 3,
+    "legendary": 2.5,
+    "elite": 2,
+    "unique": 1.5,
+    "basic": 1,
+}
+
+DAILY_XP_MIN = 100
+DAILY_XP_MAX = 1000
+
+
 # --- Post-pull bonus --------------------------------------------------------
 
 SOUR_PATCH_ODDS = 0.01          # chance of a Sour Patch Kids after any pull

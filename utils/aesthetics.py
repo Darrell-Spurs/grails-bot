@@ -270,7 +270,7 @@ def card_emoji_names(rarity, variant):
             names.append(f"{r}_{v}")
     else:
         names.append(r)
-        names.append(f"{r}_default")
+        names.append(f"{r}_{v}")
     return names
 
 

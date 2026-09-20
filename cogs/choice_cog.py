@@ -26,20 +26,9 @@ from utils.logsetup import event
 
 log = logging.getLogger("grails.choice")
 
-rarity_multiplier = {
-    "ultimate": 3,
-    "legendary": 2.5,
-    "elite": 2,
-    "unique": 1.5,
-    "basic": 1
-}
+rarity_multiplier = odds.RARITY_XP_MULTIPLIER
 
-variant_multiplier = {
-    "mythic": 1200,
-    "sketch": 500,
-    "glitched": 100,
-    "default": 30
-}
+variant_multiplier = odds.VARIANT_XP
 
 # ✅ View for button UI
 class ChooseSongView(discord.ui.View):
