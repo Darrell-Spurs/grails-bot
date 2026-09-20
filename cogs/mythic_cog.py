@@ -106,7 +106,7 @@ class MythicCog(commands.Cog):
             description=f"{artist_name}" + (f" · _{album_name}_" if album_name else ""),
             colour=discord.Colour(aesthetics.rarity_colour_int(rarity)),
         )
-        embed.add_field(name="Copies claimed", value=f"`{filled}`  {claimed} / {cap}", inline=False)
+        embed.add_field(name="Copies claimed", value=f"{filled}  {claimed} / {cap}", inline=False)
 
         if album_image:
             embed.set_thumbnail(url=album_image)
