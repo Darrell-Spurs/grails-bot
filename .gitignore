@@ -196,6 +196,8 @@ desktop.ini
 # ---- Local scratch / experiments ----
 scratch/
 scratchpad/
+# render demos, benchmark output, throwaway scripts
+testing/
 *.local.py
 
 # Runtime logs (rotated by utils/logsetup.py)

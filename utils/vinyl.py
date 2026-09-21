@@ -256,6 +256,40 @@ def vinyl_static_bytes(url, output_size=800, rarity="default"):
     buffer.seek(0)
     return buffer
 
+def vinyl_static_sig_bytes(url, artist, output_size=500, rarity="default",
+                           label_ratio=0.70, hole_ratio=0.03):
+    """A still signature vinyl: the spinning GIF's first frame, as a PNG.
+
+    `.sv` animates because the reveal is the moment; a card being looked up in
+    /view is not, and a still loads instantly and costs nothing to re-render.
+    Built from the same layers and the same signature placement as the GIF, so
+    the card matches what the pull showed.
+
+    Falls back to the unsigned disc when the artist has no signature art, which
+    is what /view should do rather than fail.
+    """
+    art = _center_crop_square(_download_image(url))
+    art = art.resize((output_size, output_size), Image.LANCZOS)
+    layers = _build_static_vinyl_layers(output_size, rarity, label_ratio, hole_ratio)
+
+    signature = sig_pos = None
+    path = find_signature(artist)
+    if path:
+        signature = Image.open(path).convert("RGBA")
+        sig_width = int(output_size * (0.4 if artist == "KATSEYE" else 0.3))
+        sig_height = int(signature.height * (sig_width / signature.width))
+        signature = signature.resize((sig_width, sig_height), Image.LANCZOS)
+        sig_pos = (layers["cx"] - sig_width // 2,
+                   layers["cy"] - sig_height // 2 + int(output_size * 0.32))
+
+    # One frame at angle 0 -- the label sits upright, as on a stopped record.
+    frame = _render_vinyl_frames(art, layers, 1, signature=signature, sig_pos=sig_pos)[0]
+    buffer = BytesIO()
+    frame.save(buffer, format="PNG")
+    buffer.seek(0)
+    return buffer
+
+
 def vinyl_art_from_url(
     url: str,
     output_path: str | None = None,

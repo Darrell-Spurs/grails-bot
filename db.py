@@ -2297,7 +2297,7 @@ def get_latest_card(user_id):
     return _card_dict(row)
 
 
-def search_user_cards(user_id, query="", variant=None, limit=25):
+def search_user_cards(user_id, query="", variant=None, limit=25, artist=None):
     """Cards in one user's collection matching free text, rarest first.
 
     Backs both the /view autocomplete and the `.view <text>` prefix form, so the
@@ -2316,6 +2316,9 @@ def search_user_cards(user_id, query="", variant=None, limit=25):
     if variant:
         sql += " AND collections.variant = ?"
         params.append(variant)
+    if artist:
+        sql += " AND songs.artist = ? COLLATE NOCASE"
+        params.append(artist)
     if query:
         like = f"%{query}%"
         sql += """ AND (songs.name LIKE ? COLLATE NOCASE

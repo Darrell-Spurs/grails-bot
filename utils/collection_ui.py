@@ -10,11 +10,13 @@ Design rules this encodes:
     so a channel keeps one collection message per invocation.
   * Only the person who ran the command may drive the components.
 """
+import asyncio
 import logging
 
 import discord
 
 import db
+from utils.card_art import ART_FILENAME, card_art_file
 from utils import aesthetics
 
 log = logging.getLogger("grails.ui")
@@ -51,7 +53,8 @@ def rarity_colour(rarity):
 # Card embed
 # ---------------------------------------------------------------------------
 
-def build_card_embed(card, owner_name, copy_number=None, owners=None, pinned=False):
+def build_card_embed(card, owner_name, copy_number=None, owners=None, pinned=False,
+                     art_filename=None, owner_icon=None):
     """One collected card. Album art comes straight from the stored Spotify URL,
     so nothing is rendered and the embed is instant."""
     rarity = (card["rarity"] or UNASSIGNED).lower()
@@ -62,18 +65,18 @@ def build_card_embed(card, owner_name, copy_number=None, owners=None, pinned=Fal
         title += f"  ·  #{copy_number}"
 
     embed = discord.Embed(title=title, colour=rarity_colour(rarity))
-    embed.set_author(name=f"{owner_name}'s card")
-    embed.add_field(name="Artist", value=card["artist"] or "—", inline=True)
-    embed.add_field(name="Album", value=card["album_name"] or "—", inline=True)
+    # set_author rejects icon_url=None, but is happy for it to be absent.
+    author = {"name": f"{owner_name}'s card"}
+    if owner_icon:
+        author["icon_url"] = owner_icon
+    embed.set_author(**author)
+    embed.description = f"by **{card['artist'] or '—'}** from *{card['album_name'] or '—'}*"
 
-    if owners is not None:
-        embed.add_field(
-            name="In circulation",
-            value=f"{owners} {'copy' if owners == 1 else 'copies'} held",
-            inline=True,
-        )
-
-    if card.get("album_image"):
+    # A variant with its own artwork is uploaded alongside the embed; everything
+    # else points straight at Spotify, which costs no upload.
+    if art_filename:
+        embed.set_image(url=f"attachment://{art_filename}")
+    elif card.get("album_image"):
         embed.set_image(url=card["album_image"])
 
     footer = f"Card #{card['collection_id']}"
@@ -272,13 +275,17 @@ class CardView(_OwnerView):
             await interaction.response.send_message(
                 "Could not pin that card — register with `.register` first.", ephemeral=True)
             return
+        art = await asyncio.to_thread(card_art_file, self.card)
         embed = build_card_embed(
             self.card, self.owner_name,
             copy_number=db.get_card_copy_number(self.card["collection_id"]),
             owners=db.count_card_owners(self.card["song_id"]),
             pinned=True,
+            art_filename=ART_FILENAME if art else None,
+            owner_icon=self.owner_icon,
         )
-        await interaction.response.edit_message(embed=embed, view=self)
+        await interaction.response.edit_message(
+            embed=embed, view=self, attachments=[art] if art else [])
         await interaction.followup.send(
             f"\U0001F4CC Pinned **{self.card['song_name']}** by {self.card['artist']} to your profile.", ephemeral=True)
 
@@ -417,13 +424,19 @@ class CollectionView(_OwnerView):
             owner_id=self.owner_id,
         )
         view.message = self.message
+        art = await asyncio.to_thread(card_art_file, card)
         embed = build_card_embed(
             card, self.owner_name,
             copy_number=db.get_card_copy_number(card["collection_id"]),
             owners=db.count_card_owners(card["song_id"]),
             pinned=_is_pinned(self.owner_id, card["collection_id"]),
+            art_filename=ART_FILENAME if art else None,
+            owner_icon=self.owner_icon,
         )
-        await interaction.response.edit_message(embed=embed, view=view)
+        # attachments=[] clears the list page's own upload, so a plain-cover
+        # card cannot inherit the previous screen's picture.
+        await interaction.response.edit_message(
+            embed=embed, view=view, attachments=[art] if art else [])
 
     @discord.ui.select(
         placeholder="Filter by variant…", row=2,

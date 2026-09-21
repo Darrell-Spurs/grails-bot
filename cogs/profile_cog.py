@@ -3,6 +3,7 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -11,6 +12,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import db
+from utils.card_art import ART_FILENAME, card_art_file
 from utils.collection_ui import (
     CardView, CollectionView, build_card_embed, card_emoji, rarity_emoji,
     rarity_colour,
@@ -76,13 +78,19 @@ class ProfileView(discord.ui.View):
         view = CardView(self.invoker_id, card, self.owner_name, owner_id=self.owner_id,
                         back_to=self.reopen, owner_icon=self.owner_icon)
         view.message = self.message
+        art = await asyncio.to_thread(card_art_file, card)
         embed = build_card_embed(
             card, self.owner_name,
             copy_number=db.get_card_copy_number(card["collection_id"]),
             owners=db.count_card_owners(card["song_id"]),
             pinned=True,
+            art_filename=ART_FILENAME if art else None,
+            owner_icon=self.owner_icon,
         )
-        await interaction.response.edit_message(embed=embed, view=view)
+        # attachments=[] clears whatever the previous screen uploaded, so the
+        # plain-cover case cannot inherit a stale picture.
+        await interaction.response.edit_message(
+            embed=embed, view=view, attachments=[art] if art else [])
 
     @discord.ui.button(label="Collection", style=discord.ButtonStyle.secondary, row=0)
     async def open_collection(self, interaction, button):
