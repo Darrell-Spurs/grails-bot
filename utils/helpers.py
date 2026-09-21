@@ -1,10 +1,8 @@
 import requests, cv2
 if __name__ == "__main__":
     from spotify_utils import get_access_token
-    from mystic import main
 else:
     from .spotify_utils import get_access_token
-    from .mystic import main
 
 import asyncio, sys, os, uuid, random, time
 from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageEnhance
@@ -477,10 +475,6 @@ def create_sketch_effect(img_input):
     # pil_img = pil_img.resize(fixed_size, Image.ANTIALIAS)
 
     return pil_img
-
-def create_mystic_effect(url):
-    mystic_img = main(url)
-    return mystic_img
 
 # Fonts were re-opened from disk on every collage (4-6 TrueType loads per
 # pull). They never change, so load each face once.

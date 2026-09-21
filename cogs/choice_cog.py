@@ -17,7 +17,7 @@ from discord.ext import commands
 from utils.helpers import (get_random_song, get_random_songs, make_3_song_collage,
                            get_random_album, draw_variant, SOURPATCH_ID, SOURPATCH_IMAGE,
                            IMAGES_DIR)
-from utils.mystic import main as generate_mythic_gif
+from utils.mystic import mythic_card_gif_bytes
 import db
 from utils import economy, odds
 from utils import aesthetics
@@ -397,9 +397,12 @@ class ChoiceCog(commands.Cog):
         card_emoji = aesthetics.card_emoji(rarity, "mythic")
         embed = discord.Embed(
             title=f"{card_emoji} **{ctx.author.display_name} PULLED A MYTHIC**",
-            description=f"||**#{next_copy_number}**|| ||**{song_name}**|| by ||**{artist}**|| from ||*{album_name}*||  ·  "
+            description=f"||**#{next_copy_number}**|| ||**{song_name}**|| by ||**{artist}**|| from ||*{album_name}*||"
                         f"\n\n",
-            color=discord.Color.from_rgb(140, 202, 247)
+            # The rarity's own colour, matching the glow on the card art and
+            # the pick embed. A fixed blue made an ultimate mythic and a basic
+            # one look identical at the moment they land.
+            color=discord.Color(aesthetics.rarity_colour_int(rarity)),
         )
         claim_view = MythicClaimView(ctx, song_id, album_id, song_name, artist, rarity)
 
@@ -410,7 +413,14 @@ class ChoiceCog(commands.Cog):
         started = time.perf_counter()
         message = await ctx.send(embed=embed, view=claim_view)
 
-        gif_buf = await asyncio.to_thread(generate_mythic_gif, album_url, True)
+        # Seeded on the song and the copy, so a given mythic always animates
+        # the same way -- two people pulling #3 and #4 of the same song get
+        # visibly different sparkle fields, and re-rendering either reproduces
+        # it exactly.
+        gif_buf = await asyncio.to_thread(
+            mythic_card_gif_bytes, album_url,
+            copy_number=next_copy_number, rarity=rarity,
+            seed=f"{song_id}:{next_copy_number}")
         if gif_buf is None:
             log.warning("mythic gif generation returned nothing for %s", album_url)
             await message.edit(content="(Missing mythic gif \u2757)")
