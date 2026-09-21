@@ -32,7 +32,7 @@ from utils.aesthetics import (  # noqa: F401
 )
 
 SORTS = {
-    "variant": "Variant (rarest within each)",
+    "variant": "Sort by variant",
     "newest": "Newest first",
     "artist": "Artist A-Z",
     "song": "Song A-Z",
@@ -113,12 +113,15 @@ def _card_line(index, card):
 
 
 def build_collection_embed(cards, page, pages, total, owner_name, *, variant=None,
-                           artist=None, sort="variant"):
-    lines = [_card_line(page * PER_PAGE + i + 1, c) for i, c in enumerate(cards)]
+                           artist=None, sort="variant", owner_icon=None):
+    """The collection page.
 
-    title = f"\U0001F4D6 {owner_name}'s collection"
-    if artist:
-        title += f" · {artist}"
+    Whose collection it is lives in the author line with their avatar, so the
+    header reads the same whatever filters are on. An artist filter goes in the
+    footer rather than the heading: it changes what is listed, not whose list
+    it is.
+    """
+    lines = [_card_line(page * PER_PAGE + i + 1, c) for i, c in enumerate(cards)]
 
     # The colour bar takes the rarest tier on the page, so scrolling towards
     # the good stuff is visible before reading a word.
@@ -126,16 +129,23 @@ def build_collection_embed(cards, page, pages, total, owner_name, *, variant=Non
     colour = rarity_colour(RARITY_ORDER[top]) if top < len(RARITY_ORDER) else discord.Colour(0x5B4BDB)
 
     embed = discord.Embed(
-        title=title,
         description="\n".join(lines) if lines else "_Nothing here with those filters._",
         colour=colour,
     )
 
     bits = [f"Page {page + 1}/{max(pages, 1)}", f"{total} {'card' if total == 1 else 'cards'}"]
+    if artist:
+        bits.append(artist)
     if variant:
         bits.append(f"{VARIANT_LABEL.get(variant, variant)}")
     bits.append(SORTS.get(sort, sort).lower())
-    embed.set_footer(text="  ·  ".join(bits))
+
+    # set_author rejects icon_url=None, but is happy for it to be absent.
+    author = {"name": f"{owner_name}'s collection"}
+    if owner_icon:
+        author["icon_url"] = owner_icon
+    embed.set_author(**author)
+    embed.set_footer(text=" · ".join(bits))
     return embed
 
 
@@ -167,6 +177,11 @@ class _OwnerView(discord.ui.View):
         self.invoker_id = int(invoker_id)
         self.message = None
         self.back_to = None
+        # Items are built base-class-first, so this button would otherwise sit
+        # to the *left* of the subclass's own controls. Re-adding moves it to
+        # the end of its row, after Prev/Next.
+        self.remove_item(self.back_to_profile)
+        self.add_item(self.back_to_profile)
 
     async def interaction_check(self, interaction):
         if interaction.user.id != self.invoker_id:
@@ -189,8 +204,8 @@ class _OwnerView(discord.ui.View):
     # Defined on the base so the collection list and a single card share one
     # implementation. Subclasses that are not reached from a profile drop it in
     # __init__, so it only ever appears when there is somewhere to go back to.
-    @discord.ui.button(label="Back to profile", emoji="↩",
-                       style=discord.ButtonStyle.secondary, row=4)
+    @discord.ui.button(label="Back to profile",
+                       style=discord.ButtonStyle.secondary, row=0)
     async def back_to_profile(self, interaction, button):
         rebuilt = self.back_to() if self.back_to else None
         if rebuilt is None:
@@ -206,7 +221,7 @@ class CardView(_OwnerView):
     """A single card, with the actions that make sense for who is looking."""
 
     def __init__(self, invoker_id, card, owner_name, *, origin=None, owner_id=None,
-                 back_to=None):
+                 back_to=None, owner_icon=None):
         super().__init__(invoker_id)
         # `back_to` is the profile this card was opened from; `origin` is a
         # collection page. A card reached through the collection keeps the
@@ -215,6 +230,7 @@ class CardView(_OwnerView):
         self.card = card
         self.owner_name = owner_name
         self.owner_id = str(owner_id if owner_id is not None else card["user_id"])
+        self.owner_icon = owner_icon
         # `origin` is the collection state to restore; None when /view was
         # called directly, in which case there is nothing to go back to.
         self.origin = origin
@@ -242,7 +258,7 @@ class CardView(_OwnerView):
         # this hands over a ready-to-run command rather than forking it.
         variant = (self.card["variant"] or "default").lower()
         await interaction.response.send_message(
-            f"To offer **{self.card['song_name']}**, run:\n"
+            f"To offer **{self.card['song_name']}** by {self.card['artist']}, run:\n"
             f"```/trade user:<who> rarity:{variant} item:{self.card['collection_id']}```"
             f"`item` is this card's id — pick it straight from autocomplete if you prefer.",
             ephemeral=True,
@@ -264,7 +280,7 @@ class CardView(_OwnerView):
         )
         await interaction.response.edit_message(embed=embed, view=self)
         await interaction.followup.send(
-            f"\U0001F4CC Pinned **{self.card['song_name']}** to your profile.", ephemeral=True)
+            f"\U0001F4CC Pinned **{self.card['song_name']}** by {self.card['artist']} to your profile.", ephemeral=True)
 
     @discord.ui.button(label="View artist", style=discord.ButtonStyle.secondary, row=0)
     async def view_artist(self, interaction, button):
@@ -274,6 +290,7 @@ class CardView(_OwnerView):
             invoker_id=self.invoker_id,
             owner_id=self.owner_id,
             owner_name=self.owner_name,
+            owner_icon=self.owner_icon,
             artist=self.card["artist"],
         )
         view.message = self.message
@@ -295,13 +312,14 @@ class CollectionView(_OwnerView):
         return True
 
     def __init__(self, invoker_id, owner_id, owner_name, *, variant=None,
-                 artist=None, sort="variant", back_to=None):
+                 artist=None, sort="variant", back_to=None, owner_icon=None):
         super().__init__(invoker_id)
         # A callable returning (embed, view) for whatever opened this list, or
         # None when /collection was run directly and there is nowhere to go.
         self.back_to = back_to
         self.owner_id = str(owner_id)
         self.owner_name = owner_name
+        self.owner_icon = owner_icon
         self.variant = variant
         self.artist = artist
         self.sort = sort
@@ -342,6 +360,7 @@ class CollectionView(_OwnerView):
         return build_collection_embed(
             self.current, self.page, self.pages, self.total, self.owner_name,
             variant=self.variant, artist=self.artist, sort=self.sort,
+            owner_icon=self.owner_icon,
         )
 
     def _sync_components(self):
@@ -351,8 +370,8 @@ class CollectionView(_OwnerView):
         opener = self.open_card
         opener.options = [
             discord.SelectOption(
-                label=f"{c['song_name']} by {c['artist']}"[:100],
-                description=f"{c['rarity']} · {VARIANT_LABEL.get((c['variant'] or 'default').lower(), c['variant'])}"[:100],
+                label=c['song_name'][:100],
+                description=c['artist'][:100],
                 emoji=safe_option_emoji(card_emoji(c["rarity"], c["variant"])),
                 value=str(c["collection_id"]),
             )

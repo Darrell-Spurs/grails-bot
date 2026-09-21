@@ -72,6 +72,7 @@ class CollectionCog(commands.Cog):
             invoker_id=ctx.author.id,
             owner_id=owner.id,
             owner_name=owner.display_name,
+            owner_icon=owner.display_avatar.url,
             variant=variant,
             artist=artist,
         )
