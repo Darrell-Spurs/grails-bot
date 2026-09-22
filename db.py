@@ -1094,31 +1094,35 @@ def get_user_song_by_details(user_id, rarity, song_name, artist_name, album_name
     conn.close()
     return result
 
-def get_user_tradeable_items(user_id, rarity, artist=None):
-    """Get a user's collection rows for a given rarity (optionally narrowed to one artist),
-    for trade selection/autocomplete. Same column order as get_user_song_by_details:
+def get_user_tradeable_items(user_id, rarity=None, artist=None):
+    """A user's collection rows for trade selection and autocomplete.
+
+    Both filters are optional and narrow independently: `rarity` is the
+    collection *variant*, `artist` the song's artist. Passing neither returns
+    the whole collection, which is what the trade autocompletes want before the
+    player has chosen anything.
+
+    Same column order as get_user_song_by_details:
     (collection_id, song_id, album_id, song_name, artist_name, variant, album_name, rarity)."""
     user_id = _uid(user_id)
     conn = get_connection()
     c = conn.cursor()
+    sql = """
+        SELECT collections.id, songs.id, albums.id, songs.name, songs.artist, collections.variant, albums.name, songs.rarity
+        FROM collections
+        JOIN songs ON collections.song_id = songs.id
+        JOIN albums ON collections.album_id = albums.id
+        WHERE collections.user_id = ?
+    """
+    params = [user_id]
+    if rarity:
+        sql += " AND collections.variant = ?"
+        params.append(rarity)
     if artist:
-        c.execute("""
-            SELECT collections.id, songs.id, albums.id, songs.name, songs.artist, collections.variant, albums.name, songs.rarity
-            FROM collections
-            JOIN songs ON collections.song_id = songs.id
-            JOIN albums ON collections.album_id = albums.id
-            WHERE collections.user_id = ? AND collections.variant = ? AND songs.artist = ? COLLATE NOCASE
-            ORDER BY songs.name ASC
-        """, (user_id, rarity, artist))
-    else:
-        c.execute("""
-            SELECT collections.id, songs.id, albums.id, songs.name, songs.artist, collections.variant, albums.name, songs.rarity
-            FROM collections
-            JOIN songs ON collections.song_id = songs.id
-            JOIN albums ON collections.album_id = albums.id
-            WHERE collections.user_id = ? AND collections.variant = ?
-            ORDER BY songs.artist ASC, songs.name ASC
-        """, (user_id, rarity))
+        sql += " AND songs.artist = ? COLLATE NOCASE"
+        params.append(artist)
+    sql += " ORDER BY songs.artist ASC, songs.name ASC"
+    c.execute(sql, tuple(params))
     results = c.fetchall()
     conn.close()
     return results
@@ -1163,22 +1167,6 @@ def transfer_collection_item(collection_id, from_user_id, to_user_id):
     return moved
 
 
-def remove_from_collection(user_id, song_id, album_id, variant):
-    """Remove a specific item from user's collection"""
-    user_id = _uid(user_id)
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("""
-    DELETE FROM collections
-    WHERE rowid = (
-        SELECT rowid FROM collections
-        WHERE user_id = ? AND song_id = ? AND album_id = ? AND variant = ?
-        LIMIT 1
-    )
-    """, (user_id, song_id, album_id, variant))
-    conn.commit()
-    conn.close()
-    
 def register_user(user_id, xp=0, username=None):
     """Register a new user in the database"""
     user_id = _uid(user_id)

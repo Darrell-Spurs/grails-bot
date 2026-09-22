@@ -34,13 +34,34 @@ You bank one drop every **3 minutes**, up to **20**.
 
 | Command | Parameters | Invoked as | What it does |
 |---|---|---|---|
-| `/trade` | `<user> <rarity> [artist] <item>` | slash only | Offer one of your cards to another player |
-| `/offer` | `<rarity> [artist] <item>` | slash only | Answer an open trade with a card of your own |
-| `/canceltrade` | — | slash only | Withdraw your pending trade |
-| `/gift` | `<user> <rarity> [artist] [item]` | slash only | Give a card away outright — one-way, nothing comes back |
+| `/trade` | `<user> [rarity] [artist] [item]` | slash only | Offer one of your cards to another player |
+| `/offer` | `[rarity] [artist] [item]` | slash only | Answer an open trade with a card of your own |
+| `/canceltrade` | — | hybrid (`.ct`) | Withdraw your pending trade |
+| `/gift` | `<user> [rarity] [artist] [item]` | slash only | Give a card away outright — one-way, nothing comes back |
 
-Slash-only so the card arguments come with autocomplete — `artist` narrows the
-`item` list, which matters once a collection gets large.
+`rarity` and `artist` are both filters, not requirements — they narrow the
+`item` list, which matters once a collection gets large, and either on its own
+is enough to fill it. With neither set the list waits until you have typed two
+characters, and its results are labelled with their variant since they can span
+all of them. Omit everything and you offer your newest card.
+
+The two sides of a trade **do not have to match**. A mythic can be traded for a
+default; each card keeps its own variant across the swap, keeping its row and so
+its mythic copy number.
+
+`/gift` asks before it moves anything: it posts a **Gift pending** card with
+**Send** and **Cancel**, and only the gifter can press either. The card does not
+change hands until Send, which matters because a gift has no counter-offer and
+no undo.
+
+A posted trade request carries an **Offer a card** button, so the other player
+never has to type `/offer` at all. It opens a private dropdown of their newest
+25 cards, plus **Search by name** for anything past that — a dropdown takes no
+typed input, so the search opens a small text box instead.
+
+`/canceltrade` is the exception: it takes no arguments, so it keeps a prefix
+form and the short `.ct` alias. A trade request cancels itself after **2
+minutes** if nobody answers it, with the same result as running the command.
 
 ## 3 · Your account
 
