@@ -35,7 +35,6 @@ You bank one drop every **3 minutes**, up to **20**.
 | Command | Parameters | Invoked as | What it does |
 |---|---|---|---|
 | `/trade` | `<user> [rarity] [artist] [item]` | slash only | Offer one of your cards to another player |
-| `/offer` | `[rarity] [artist] [item]` | slash only | Answer an open trade with a card of your own |
 | `/canceltrade` | — | hybrid (`.ct`) | Withdraw your pending trade |
 | `/gift` | `<user> [rarity] [artist] [item]` | slash only | Give a card away outright — one-way, nothing comes back |
 
@@ -54,10 +53,15 @@ its mythic copy number.
 change hands until Send, which matters because a gift has no counter-offer and
 no undo.
 
-A posted trade request carries an **Offer a card** button, so the other player
-never has to type `/offer` at all. It opens a private dropdown of their newest
-25 cards, plus **Search by name** for anything past that — a dropdown takes no
-typed input, so the search opens a small text box instead.
+A card open in `/view` or `/collection` has a **Trade this** button, which
+starts a trade with that exact card. It asks only for the counterparty — a
+member picker, so there is no name to mistype — and posts the request itself.
+
+Answering a trade is **not** a command. A posted request carries an **Offer a
+card** button, and that is the only way to respond: it opens a private dropdown
+of the responder's newest 25 cards, plus **Search by name** for anything past
+that — a dropdown takes no typed input, so the search opens a small text box
+instead.
 
 `/canceltrade` is the exception: it takes no arguments, so it keeps a prefix
 form and the short `.ct` alias. A trade request cancels itself after **2

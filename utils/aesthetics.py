@@ -53,7 +53,7 @@ RARITY_COLOR = {
 VARIANTS = ["mythic", "sig_vinyl", "vinyl", "sketch", "glitched", "default"]
 
 VARIANT_LABEL = {
-    "mythic": "Mythic", "sig_vinyl": "Signature", "vinyl": "Vinyl",
+    "mythic": "Mythic", "sig_vinyl": "Signature Vinyl", "vinyl": "Vinyl",
     "sketch": "Sketch", "glitched": "Glitched", "default": "Standard",
 }
 

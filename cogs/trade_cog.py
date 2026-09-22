@@ -16,7 +16,7 @@ from db import (get_user_song_by_details, transfer_collection_item, user_exists,
                 get_user_mythic_copy_number, get_user_tradeable_items, get_collection_item_by_id)
 from utils.command_types import slash_only
 from utils.errors import report_unhandled
-from utils.aesthetics import ACCENT_COLOR_INT, VARIANTS, card_emoji, safe_option_emoji
+from utils.aesthetics import ACCENT_COLOR_INT, VARIANTS, VARIANT_LABEL, card_emoji, safe_option_emoji
 
 log = logging.getLogger("grails.trade")
 
@@ -185,7 +185,7 @@ def _card_option(row):
         value=str(row[0]),
         # The variant and album, which is what tells two copies of one song
         # apart in a list that shows every variant at once.
-        description=f"{row[4]} - {_variant_of(row)}"[:100],
+        description=f"{row[4]} · {VARIANT_LABEL.get(_variant_of(row), _variant_of(row))}"[:100],
         emoji=safe_option_emoji(card_emoji(row[7] if len(row) > 7 else None,
                                           (_variant_of(row) or "").lower())),
     )
@@ -214,8 +214,8 @@ class OfferSelect(discord.ui.Select):
 class OfferSearchModal(discord.ui.Modal, title="Find a card to offer"):
     """The typed-input escape hatch for collections past 25 cards."""
 
-    query = discord.ui.TextInput(label="Song name", required=True, max_length=100,
-                                 placeholder="Part of the title is enough")
+    query = discord.ui.TextInput(label="Enter Keywords", required=True, max_length=100,
+                                 placeholder="Search by part of the title or artist")
 
     def __init__(self, picker):
         super().__init__()
@@ -254,14 +254,14 @@ class OfferPicker(discord.ui.View):
         hits = [r for r in rows if needle in r[3].lower() or needle in r[4].lower()]
         if not hits:
             await interaction.response.edit_message(
-                content=f"No card of yours matches **{text}**. Try a shorter piece of the title.",
+                content=f"None of your cards matches **{text}**. Try again.",
                 view=self)
             return
         self.rebuild(_newest_first(hits))
         shown = min(len(hits), SELECT_LIMIT)
         more = f" (showing the {shown} newest)" if len(hits) > SELECT_LIMIT else ""
         await interaction.response.edit_message(
-            content=f"**{len(hits)}** match **{text}**{more}.", view=self)
+            content=f"**{len(hits)}** matched **{text}**{more}.", view=self)
 
     async def submit(self, interaction, row):
         if self._trade() is None:
@@ -271,7 +271,7 @@ class OfferPicker(discord.ui.View):
         # Answer the interaction before running the trade: the confirmation
         # waits on reactions for up to a minute, far past the 3s Discord allows.
         await interaction.response.edit_message(
-            content=f"Offered **{row[3]}**. Both of you react on the trade message to confirm.",
+            content=f"Offered **{row[3]}**. React on the trade message to confirm.",
             view=None)
         trade = self._trade()
         await self.cog._run_offer(self.responder, self.trade_key, trade, row)
@@ -279,7 +279,7 @@ class OfferPicker(discord.ui.View):
 
 class _SearchButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(label="Search by name", style=discord.ButtonStyle.secondary)
+        super().__init__(label="Search for more cards", style=discord.ButtonStyle.secondary)
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.send_modal(OfferSearchModal(self.view))
@@ -312,9 +312,7 @@ class TradeRequestView(discord.ui.View):
             return
 
         rows = _newest_first(rows)
-        note = (f"Your newest {SELECT_LIMIT} cards. Use **Search by name** for the other "
-                f"{len(rows) - SELECT_LIMIT}." if len(rows) > SELECT_LIMIT
-                else "Pick the card you want to offer.")
+        note = (f"Your newest {SELECT_LIMIT} cards. Use **Search for more cards** for the rest ")
         await interaction.response.send_message(
             note, view=OfferPicker(self.cog, self.trade_key, interaction.user, rows),
             ephemeral=True)
@@ -453,8 +451,7 @@ class TradeCog(commands.Cog):
             return False
         embed = discord.Embed(
             title="❌ Trade Cancelled",
-            description=f"Trade between **{data['initiator'].display_name}** and "
-                        f"**{data['target'].display_name}** {reason}.",
+            description=f"**{data['target'].display_name}** {reason}.",
             color=discord.Color.red(),
         )
         view = data.get("view")
@@ -508,14 +505,14 @@ class TradeCog(commands.Cog):
             options = "\n".join(f"- {m[3]} - {m[4]} ({m[6]})" for m in matches[:10])
             more = f"\n…and {len(matches) - 10} more" if len(matches) > 10 else ""
             return (f"❌ **Multiple {rarity_note}songs{artist_note} match `{item}`** — be more specific, "
-                    f"or use `/trade`/`/offer` for autocomplete:\n{options}{more}")
+                    f"or be more specific:\n{options}{more}")
         if not (item or "").strip():
             # No item was named, so nothing "matched" -- the user simply owns
             # nothing that fits the filters.
             return (f"❌ **You don't have any {rarity_note}songs{artist_note} to offer.**\n"
                     f"Pull some with `.c`, or widen the filters.")
         return (f"❌ **You don't have a {rarity_note}song{artist_note} matching `{item}`.**\n"
-                f"Use `/trade` or `/offer` for autocomplete of your collection (with an artist filter "
+                f"Use `/trade` for autocomplete of your collection (with an artist filter "
                 f"if you have a lot of songs).")
 
     async def _resolve_trade_item(self, user_id, rarity, artist, item):
@@ -542,11 +539,11 @@ class TradeCog(commands.Cog):
                 return retry_found, retry_matches, None
         return song_found, matches, artist
 
-    @commands.hybrid_command(name="trade", description="Offer a song to trade with another user")
+    @commands.hybrid_command(name="trade", description="Offer a song to trade (default to the most recent song)")
     @slash_only()
     @app_commands.describe(user="User to trade with", rarity="Optional: only offer cards of this variant",
                            artist="Optional: only cards by this artist",
-                           item="The song to offer (default: your newest match)")
+                           item="The song to offer (search with song title or artist)")
     @app_commands.autocomplete(rarity=_rarity_autocomplete, artist=_own_artist_autocomplete, item=_own_item_autocomplete)
     async def trade(self, ctx, user: discord.Member, rarity: Optional[str] = None, *,
                     artist: Optional[str] = None, item: Optional[str] = None):
@@ -561,54 +558,65 @@ class TradeCog(commands.Cog):
                            f"**Valid Rarities:** {', '.join(f'`{r}`' for r in RARITIES)}")
             return
 
-        if user.id == ctx.author.id:
-            await ctx.send("❌ **You can't trade with yourself!**")
-            return
-
-        if user.bot:
-            await ctx.send("❌ **You can't trade with bots!**")
-            return
-
-        trade_key = f"{ctx.author.id}_{user.id}"
-        reverse_trade_key = f"{user.id}_{ctx.author.id}"
-        if trade_key in self.active_trades or reverse_trade_key in self.active_trades:
-            await ctx.send("❌ There's already an active trade between you two!\n"
-                           "**Tip:** Use `/canceltrade` to cancel the existing trade.")
-            return
-
-        song_found, matches, artist = await self._resolve_trade_item(str(ctx.author.id), rarity, artist, item)
+        song_found, matches, artist = await self._resolve_trade_item(
+            str(ctx.author.id), rarity, artist, item)
         if song_found is None:
             await ctx.send(self._ambiguous_message(rarity, item, matches, artist))
             return
 
+        problem = await self.start_trade(ctx.channel, ctx.author, user, song_found)
+        if problem:
+            await ctx.send(problem)
+
+    async def start_trade(self, channel, initiator, target, song_found):
+        """Post a trade request for `song_found`. Returns a complaint, or None.
+
+        Split out of /trade so the "Trade this" button on a card can open a
+        trade without reproducing any of this. Everything the trade needs is
+        here -- the eligibility checks included -- because a caller that only
+        has a card and two users has no way to run them itself.
+        """
+        if target.id == initiator.id:
+            return "❌ **You can't trade with yourself!**"
+        if target.bot:
+            return "❌ **You can't trade with bots!**"
+        if not await asyncio.to_thread(user_exists, target.id):
+            return f"❌ **{target.display_name}** is not registered yet."
+
+        trade_key = f"{initiator.id}_{target.id}"
+        reverse_trade_key = f"{target.id}_{initiator.id}"
+        if trade_key in self.active_trades or reverse_trade_key in self.active_trades:
+            return ("❌ There's already an active trade between you two!"
+                    "\n**Tip:** Use `/canceltrade` to cancel the existing trade.")
+
         embed = discord.Embed(
             title="🔄 Trade Request",
-            description=f"**{ctx.author.display_name}** wants to trade with "
-                        f"**{user.display_name}**",
+            description=f"**{initiator.display_name}** wants to trade with "
+                        f"**{target.display_name}**",
             color=discord.Color.blue()
         )
         embed.add_field(
-            name=f"{ctx.author.display_name} offers:",
-            value=self.format_song_display(str(ctx.author.id), song_found),
+            name=f"{initiator.display_name} offers:",
+            value=self.format_song_display(str(initiator.id), song_found),
             inline=False
         )
         embed.add_field(
-            name="Waiting for:",
-            value=f"**{user.display_name}** to offer a card of their own",
+            name=f"{target.display_name} offers:",
+            value="Pending — click **Offer a card** below",
             inline=False
         )
-        embed.set_footer(text=f"{user.display_name}, click Offer a card or use /offer")
+        embed.set_footer(text="Use /canceltrade or .ct to cancel the trade.")
 
         # The view only stores the key, so it can be built before the trade is
         # registered a few lines below -- it looks the trade up on each click
         # rather than holding a reference that could go stale.
-        view = TradeRequestView(self, trade_key, user)
-        trade_msg = await ctx.send(content=_mentions(user), embed=embed, view=view)
+        view = TradeRequestView(self, trade_key, target)
+        trade_msg = await channel.send(content=_mentions(target), embed=embed, view=view)
 
         token = object()
         self.active_trades[trade_key] = {
-            'initiator': ctx.author,
-            'target': user,
+            'initiator': initiator,
+            'target': target,
             'initiator_song': song_found,
             # The variant of the card actually offered, not the filter that
             # found it -- this is what gets removed from the collection.
@@ -617,22 +625,15 @@ class TradeCog(commands.Cog):
             'view': view,
             'token': token,
         }
-
-        # The countdown is its own task rather than being awaited here. A bare
-        # `await asyncio.sleep(120)` kept this command running for two minutes
-        # after it had already replied -- and because the key is just the two
-        # user ids, a second trade between the same pair started inside that
-        # window was killed by the *first* trade's timer, against the first
-        # trade's message. Matching on the token means a timer can only ever
-        # expire the trade that created it.
         self.active_trades[trade_key]["timer"] = asyncio.create_task(
             self._expire_trade(trade_key, token))
+        return None
 
-    @commands.hybrid_command(name="gift", description="Gift a song to a user")
+    @commands.hybrid_command(name="gift", description="Gift a song (default to the most recent song)")
     @slash_only()
     @app_commands.describe(user="Who to gift it to", rarity="Optional: only gift cards of this variant",
                            artist="Optional: only cards by this artist",
-                           item="The song to gift (default: your newest match)")
+                           item="The song to gift (search with song title or artist)")
     @app_commands.autocomplete(rarity=_rarity_autocomplete, artist=_own_artist_autocomplete,
                                item=_own_item_autocomplete)
     async def gift(self, ctx, user: discord.Member, rarity: Optional[str] = None, *,
@@ -692,50 +693,12 @@ class TradeCog(commands.Cog):
             return
         await report_unhandled(log, ctx, error, command="gift")
 
-    @commands.hybrid_command(name="offer", description="Respond to a trade request with your offer")
-    @slash_only()
-    @app_commands.describe(rarity="Optional: only offer cards of this variant",
-                           artist="Optional: only cards by this artist",
-                           item="The song to offer (default: your newest match)")
-    @app_commands.autocomplete(rarity=_rarity_autocomplete, artist=_own_artist_autocomplete, item=_own_item_autocomplete)
-    async def offer(self, ctx, rarity: Optional[str] = None, *,
-                    artist: Optional[str] = None, item: Optional[str] = None):
-        """Respond to a trade request with your offer.
-        Usage: .offer [rarity] [song] — or use /offer for autocomplete (+ optional artist filter).
-        """
-        # A filter, not a requirement: absent means "any variant". Only a value
-        # that was actually typed and is not a variant is an error.
-        rarity = (rarity or "").lower() or None
-        if rarity is not None and rarity not in RARITIES:
-            await ctx.send(f"❌ **Invalid Rarity: `{rarity}`**\n"
-                           f"**Valid Rarities:** {', '.join(f'`{r}`' for r in RARITIES)}")
-            return
-
-        trade_key = None
-        trade_data = None
-        for key, data in self.active_trades.items():
-            if data['target'].id == ctx.author.id:
-                trade_key, trade_data = key, data
-                break
-
-        if not trade_data:
-            await ctx.send("❌ **No active trade request found for you!**\n"
-                           "**Note:** Someone needs to trade with you first using `/trade`.")
-            return
-
-        song_found, matches, artist = await self._resolve_trade_item(str(ctx.author.id), rarity, artist, item)
-        if song_found is None:
-            await ctx.send(self._ambiguous_message(rarity, item, matches, artist))
-            return
-
-        await self._run_offer(ctx.author, trade_key, trade_data, song_found)
-
     async def _run_offer(self, responder, trade_key, trade_data, song_found):
         """Put `song_found` up against the open trade and run the confirmation.
 
-        Split out of /offer so the Offer button drives exactly the same path.
-        Takes the responder rather than a Context because a button callback has
-        an Interaction and no Context at all.
+        Driven only by the Offer button now that /offer is gone. Takes the
+        responder rather than a Context because a button callback has an
+        Interaction and no Context at all.
         """
         initiator_song = trade_data['initiator_song']
         embed = discord.Embed(
@@ -867,11 +830,11 @@ class TradeCog(commands.Cog):
         mine = [key for key, data in self.active_trades.items()
                 if ctx.author.id in (data['initiator'].id, data['target'].id)]
         for key in mine:
-            await self._close_trade(key, "has been cancelled")
+            await self._close_trade(key, "cancelled the trade.")
         cancelled = bool(mine)
 
         if cancelled:
-            await ctx.send("⚠️ Your active trade has been cancelled.")
+            await ctx.send("⚠️ Your trade has been cancelled.")
         else:
             await ctx.send("❌ You don't have any active trades to cancel.")
 
@@ -885,16 +848,6 @@ class TradeCog(commands.Cog):
             await ctx.send("❌ **Invalid user!** Make sure to properly mention (@) a valid user.")
         else:
             raise error
-
-    @offer.error
-    async def offer_error(self, ctx, error):
-        """Handle errors for the offer command"""
-        if isinstance(error, commands.MissingRequiredArgument):
-            await ctx.send("❌ **Missing arguments!**\n"
-                           "**Usage:** `.offer [rarity] [song]` — or use `/offer` for autocomplete.")
-        else:
-            raise error
-
 
 async def setup(bot):
     await bot.add_cog(TradeCog(bot))

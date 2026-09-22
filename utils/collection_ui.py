@@ -220,6 +220,57 @@ class _OwnerView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=view)
 
 
+class TradePartnerSelect(discord.ui.UserSelect):
+    """Pick who to trade a specific card with.
+
+    A UserSelect rather than a text box: it resolves to a real member, so there
+    is no name to mistype and no ambiguity between two people called the same
+    thing. It cannot live in a modal -- Discord only allows text inputs there --
+    so the button opens this as an ephemeral view instead.
+    """
+
+    def __init__(self, card):
+        self.card = card
+        super().__init__(placeholder="Who do you want to trade with?",
+                         min_values=1, max_values=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        target = self.values[0]
+        cog = interaction.client.get_cog("TradeCog")
+        if cog is None:
+            await interaction.response.edit_message(
+                content="Trading is unavailable right now.", view=None)
+            return
+
+        # Re-read the row instead of rebuilding it from the card dict: the query
+        # is scoped to the owner, so it doubles as the check that this card is
+        # still theirs after however long the card embed has been on screen.
+        row = await asyncio.to_thread(
+            db.get_collection_item_by_id, self.card["collection_id"], interaction.user.id)
+        if row is None:
+            await interaction.response.edit_message(
+                content="That card is no longer yours.", view=None)
+            return
+
+        await interaction.response.edit_message(
+            content=f"Starting a trade with **{target.display_name}**…", view=None)
+        problem = await cog.start_trade(interaction.channel, interaction.user, target, row)
+        if problem:
+            await interaction.edit_original_response(content=problem)
+
+
+class TradePartnerView(discord.ui.View):
+    """The ephemeral partner picker behind the Trade this button."""
+
+    def __init__(self, invoker_id, card, *, timeout=120):
+        super().__init__(timeout=timeout)
+        self.invoker_id = str(invoker_id)
+        self.add_item(TradePartnerSelect(card))
+
+    async def interaction_check(self, interaction: discord.Interaction):
+        return str(interaction.user.id) == self.invoker_id
+
+
 class CardView(_OwnerView):
     """A single card, with the actions that make sense for who is looking."""
 
@@ -257,13 +308,12 @@ class CardView(_OwnerView):
 
     @discord.ui.button(label="Trade this", style=discord.ButtonStyle.primary, row=0)
     async def trade_this(self, interaction, button):
-        # The trade flow needs a counterparty and runs its own state machine, so
-        # this hands over a ready-to-run command rather than forking it.
-        variant = (self.card["variant"] or "default").lower()
+        # Opens the trade for real rather than printing a command to retype.
+        # The one thing the card cannot supply is a counterparty, so that is all
+        # this asks for; everything else is already known.
         await interaction.response.send_message(
-            f"To offer **{self.card['song_name']}** by {self.card['artist']}, run:\n"
-            f"```/trade user:<who> rarity:{variant} item:{self.card['collection_id']}```"
-            f"`item` is this card's id — pick it straight from autocomplete if you prefer.",
+            f"Trading **{self.card['song_name']}** by {self.card['artist']}.",
+            view=TradePartnerView(self.invoker_id, self.card),
             ephemeral=True,
         )
 

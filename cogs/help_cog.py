@@ -28,7 +28,9 @@ BRIEF_MAX = 72
 # otherwise let a newly added command silently never show up in /help.
 HELP_SECTIONS = (
     ("Drops", ("choice", "sigvinyl", "vinyl", "cooldown")),
-    ("Trading", ("trade", "offer", "canceltrade", "gift")),
+    # No "offer": answering a trade is the Offer a card button on the request
+    # itself, not a command, so there is nothing for /help to list.
+    ("Trading", ("trade", "canceltrade", "gift")),
     ("Your account", ("register", "collection", "profile", "view", "xp",
                       "daily", "vinylcheck")),
     ("Catalogue", ("artists", "albums", "songs", "mythiccheck")),
@@ -115,7 +117,7 @@ class HelpCog(commands.Cog):
 
         embed = discord.Embed(
             title="Grails-Bot commands",
-            description="One line each. `<x>` is required, `[x]` optional.",
+            description="`<x>` is required, `[x]` optional.",
             color=discord.Color.blurple(),
         )
 
