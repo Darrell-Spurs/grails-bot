@@ -4,6 +4,7 @@ import os
 import re
 import sqlite3
 import threading
+import time
 
 from utils import economy, odds
 
@@ -58,7 +59,15 @@ def _get_pg_pool():
                     # different backend, which then errors on the unknown prepared
                     # statement. Disabling preparation keeps us correct on either
                     # pooler mode, at a negligible cost for queries this small.
-                    kwargs={"prepare_threshold": None},
+                    #
+                    # autocommit: without it psycopg opens a transaction before the
+                    # first statement and close() has to roll it back, so every
+                    # function paid BEGIN + query + ROLLBACK -- three round trips
+                    # to the database where one does the job. Measured against
+                    # Supabase that was ~164ms per call against ~52ms. The few
+                    # functions that need several writes to land together open
+                    # their own transaction with _begin().
+                    kwargs={"prepare_threshold": None, "autocommit": True},
                     open=True,
                 )
     return _pg_pool
@@ -197,12 +206,17 @@ class _PooledConnection:
 # ---------------------------------------------------------------------------
 # Shared connection
 #
-# Every query function here opens and closes its own connection. Against a
-# remote pooler that costs a round-trip each time (~165ms measured, vs ~86ms
-# when a connection is reused), so a command issuing several queries pays it
-# over and over. shared_connection() pins one connection to the current thread
-# for the duration of a block; get_connection() then hands out a non-closing
-# view of it, so none of the existing functions need to change.
+# shared_connection() pins one connection to the current thread for the
+# duration of a block; get_connection() then hands out a non-closing view of
+# it, so none of the existing functions need to change.
+#
+# It was written to cut a per-call cost that turned out to be the transaction
+# wrapper rather than the connection: checking a connection out of the pool is
+# effectively free, but every call used to pay BEGIN and ROLLBACK around its
+# query, and sharing a connection shared the transaction. With the pool in
+# autocommit that cost is gone for every call, so on Postgres this is now
+# neutral. It stays because it is harmless, existing callers use it, and on
+# SQLite it still saves reopening the database file.
 #
 # Thread-local rather than global: the bot offloads DB work with
 # asyncio.to_thread, and a SQLite connection may not cross threads anyway.
@@ -266,6 +280,25 @@ def get_connection():
     return _open_connection()
 
 
+def _begin(conn):
+    """Open an explicit transaction for a function whose writes must all land
+    or none of them.
+
+    Postgres connections run in autocommit, so each statement commits on its
+    own. A function that issues several dependent writes calls this first; its
+    existing commit() and rollback() then end the transaction exactly as they
+    did before. A no-op when a transaction is already open -- a nested call
+    inside shared_connection(), or SQLite having begun one implicitly.
+    """
+    inner = conn._inner if isinstance(conn, _SharedConnection) else conn
+    if isinstance(inner, _PooledConnection):
+        from psycopg.pq import TransactionStatus
+        if inner._raw.info.transaction_status == TransactionStatus.IDLE:
+            inner._raw.execute("BEGIN")
+    elif not inner.in_transaction:          # sqlite3.Connection
+        inner.execute("BEGIN")
+
+
 def _open_connection():
     if IS_POSTGRES:
         pool = _get_pg_pool()
@@ -275,6 +308,46 @@ def _open_connection():
     conn.execute("PRAGMA busy_timeout = 10000")
     conn.execute("PRAGMA foreign_keys = ON")  # SQLite needs this per-connection to enforce FKs
     return conn
+
+# ---- Postgres schema guards ---------------------------------------------------
+#
+# The schema below runs on every start, and most of it is already in place. That
+# used to cost more than time: measured against a scratch table, an
+# "ALTER TABLE ... ADD COLUMN IF NOT EXISTS" whose column already exists still
+# takes an ACCESS EXCLUSIVE lock -- blocking even plain reads -- and so does
+# "DROP CONSTRAINT IF EXISTS" on an absent constraint, while
+# "CREATE INDEX IF NOT EXISTS" on an existing index takes a SHARE lock, which
+# blocks writes. Every boot was briefly locking users and songs against every
+# query; pg_stat_statements showed the constraint drop waiting up to 1.2s.
+#
+# These wrap each such statement in a DO block that checks the catalog first,
+# which takes no lock at all, so a boot with nothing to change touches nothing.
+# The inner statement keeps its own IF [NOT] EXISTS so two instances starting at
+# the same moment cannot trip over each other.
+
+def _pg_add_column(table, column, definition):
+    return (f"DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM information_schema.columns "
+            f"WHERE table_schema = current_schema() AND table_name = '{table}' "
+            f"AND column_name = '{column}') THEN "
+            f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition}; "
+            f"END IF; END $$")
+
+
+def _pg_drop_constraint(table, constraint):
+    return (f"DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_constraint "
+            f"WHERE conname = '{constraint}' AND conrelid = '{table}'::regclass) THEN "
+            f"ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {constraint}; "
+            f"END IF; END $$")
+
+
+def _pg_index(name, ddl):
+    # Checked in pg_indexes against current_schema(), not with to_regclass():
+    # that resolves through the whole search_path, so an index of the same name
+    # in another schema would wrongly count as this one existing.
+    return (f"DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_indexes "
+            f"WHERE schemaname = current_schema() AND indexname = '{name}') THEN "
+            f"{ddl}; END IF; END $$")
+
 
 _POSTGRES_SCHEMA = (
     # CITEXT gives case-insensitive equality/LIKE on the columns the bot looks up
@@ -294,9 +367,10 @@ _POSTGRES_SCHEMA = (
     # artist are two distinct tracks here). Expressing the uniqueness over the
     # text casts keeps both backends behaving identically, while the columns
     # stay CITEXT so lookups remain case-insensitive.
-    "ALTER TABLE songs DROP CONSTRAINT IF EXISTS songs_name_artist_key",
-    """CREATE UNIQUE INDEX IF NOT EXISTS songs_name_artist_unique
-       ON songs ((name::text), (artist::text))""",
+    _pg_drop_constraint("songs", "songs_name_artist_key"),
+    _pg_index("songs_name_artist_unique",
+              "CREATE UNIQUE INDEX IF NOT EXISTS songs_name_artist_unique "
+              "ON songs ((name::text), (artist::text))"),
 
     """CREATE TABLE IF NOT EXISTS albums (
         id TEXT PRIMARY KEY,
@@ -330,14 +404,14 @@ _POSTGRES_SCHEMA = (
 
     # Existing deployments predate the profile columns. Postgres supports
     # IF NOT EXISTS on ADD COLUMN, so these are safe to run on every start.
-    "ALTER TABLE users ADD COLUMN IF NOT EXISTS pinned_collection_id INTEGER DEFAULT NULL",
-    "ALTER TABLE users ADD COLUMN IF NOT EXISTS favorite_artist TEXT DEFAULT NULL",
+    _pg_add_column("users", "pinned_collection_id", "INTEGER DEFAULT NULL"),
+    _pg_add_column("users", "favorite_artist", "TEXT DEFAULT NULL"),
 
     # Drop economy. pull_charges_at is the anchor the balance regenerates from;
     # NULL means "never spent", which utils/economy.py reads as a full stack, so
     # players who predate the feature are not punished for it.
-    "ALTER TABLE users ADD COLUMN IF NOT EXISTS pull_charges INTEGER DEFAULT 20",
-    "ALTER TABLE users ADD COLUMN IF NOT EXISTS pull_charges_at TIMESTAMP DEFAULT NULL",
+    _pg_add_column("users", "pull_charges", "INTEGER DEFAULT 20"),
+    _pg_add_column("users", "pull_charges_at", "TIMESTAMP DEFAULT NULL"),
 
     """CREATE TABLE IF NOT EXISTS collections (
         id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -360,14 +434,20 @@ _POSTGRES_SCHEMA = (
         artist TEXT
     )""",
 
-    "CREATE INDEX IF NOT EXISTS idx_user ON collections(user_id)",
-    "CREATE INDEX IF NOT EXISTS idx_song ON collections(song_id)",
-    "CREATE INDEX IF NOT EXISTS idx_collections_user_variant ON collections(user_id, variant)",
-    "CREATE INDEX IF NOT EXISTS idx_collections_song_variant ON collections(song_id, variant)",
-    "CREATE INDEX IF NOT EXISTS idx_songs_artist_rarity ON songs(artist, rarity)",
-    "CREATE INDEX IF NOT EXISTS idx_albums_artist ON albums(artist)",
-    "CREATE INDEX IF NOT EXISTS idx_song_album_song ON song_album(song_id)",
-    "CREATE INDEX IF NOT EXISTS idx_song_album_album ON song_album(album_id)",
+    *(_pg_index(name, f"CREATE INDEX IF NOT EXISTS {name} ON {target}") for name, target in (
+        ("idx_user", "collections(user_id)"),
+        ("idx_song", "collections(song_id)"),
+        ("idx_collections_user_variant", "collections(user_id, variant)"),
+        ("idx_collections_song_variant", "collections(song_id, variant)"),
+        # collections.album_id is a foreign key, and Postgres does not index
+        # those itself: without this, removing an artist's albums scanned
+        # every collection row to check nothing still pointed at them.
+        ("idx_collections_album", "collections(album_id)"),
+        ("idx_songs_artist_rarity", "songs(artist, rarity)"),
+        ("idx_albums_artist", "albums(artist)"),
+        ("idx_song_album_song", "song_album(song_id)"),
+        ("idx_song_album_album", "song_album(album_id)"),
+    )),
 )
 
 
@@ -396,16 +476,18 @@ MIGRATE_RARITIES_SQL = (
 
 def _init_postgres():
     """Create the schema on Postgres. Mirrors the SQLite schema below, with
-    AUTOINCREMENT -> IDENTITY and the name columns typed CITEXT."""
-    conn = get_connection()
-    try:
-        c = conn.cursor()
-        for statement in _POSTGRES_SCHEMA:
-            c.execute(statement)
-        c.execute(MIGRATE_RARITIES_SQL)
-        conn.commit()
-    finally:
-        conn.close()
+    AUTOINCREMENT -> IDENTITY and the name columns typed CITEXT.
+
+    Sent as one multi-statement batch -- a single round trip rather than one
+    per statement (24 of them, ~1.4s at boot). Postgres runs a batch like this
+    as one implicit transaction, so it is still all-or-nothing, as it was when
+    every statement shared one explicit transaction. It goes straight to the
+    raw connection because it is Postgres SQL already and must not pass through
+    the SQLite translation layer.
+    """
+    batch = ";\n".join((*_POSTGRES_SCHEMA, MIGRATE_RARITIES_SQL))
+    with _get_pg_pool().connection() as raw:
+        raw.execute(batch)
 
 
 def init_db():
@@ -520,6 +602,8 @@ def init_db():
     # ---- indexes for the common hot-path filters ----
     c.execute("CREATE INDEX IF NOT EXISTS idx_collections_user_variant ON collections(user_id, variant)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_collections_song_variant ON collections(song_id, variant)")
+    # Foreign key, which neither backend indexes on its own. See _POSTGRES_SCHEMA.
+    c.execute("CREATE INDEX IF NOT EXISTS idx_collections_album ON collections(album_id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_songs_artist_rarity ON songs(artist, rarity)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_albums_artist ON albums(artist)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_song_album_song ON song_album(song_id)")
@@ -574,6 +658,57 @@ def _uid(user_id):
     return None if user_id is None else str(user_id)
 
 
+# ---------------------------------------------------------------------------
+# Catalogue cache
+#
+# The artist list, the /artists overview and per-artist album counts are read
+# constantly -- album autocomplete fires on every keystroke -- yet only change
+# when an admin imports or removes an artist. Serving them from memory turns a
+# database round trip into a dict lookup.
+#
+# Coherent within the process: every write to albums or song_album goes through
+# this module and calls _invalidate_catalog(), and the web panel runs as a
+# thread inside the bot's process, so it shares this cache too. The TTL only
+# matters for writes that bypass the module entirely, such as a one-off script.
+#
+# The generation counter closes the one real race: a read that began before an
+# invalidation must not store its now-stale result after it.
+# ---------------------------------------------------------------------------
+
+CATALOG_CACHE_TTL = 300  # seconds
+
+_catalog_cache = {}
+_catalog_generation = 0
+_catalog_lock = threading.Lock()
+
+
+def _invalidate_catalog():
+    """Drop every cached catalogue read. Call after any albums/song_album write."""
+    global _catalog_generation
+    with _catalog_lock:
+        _catalog_generation += 1
+        _catalog_cache.clear()
+
+
+def _catalog_cached(key, load):
+    """The cached value for `key`, loading it with `load()` on a miss.
+
+    Returns the cached object itself; public callers hand out a copy so a caller
+    that sorts or shuffles its result cannot corrupt what the next one sees.
+    """
+    now = time.monotonic()
+    with _catalog_lock:
+        hit = _catalog_cache.get(key)
+        if hit is not None and now < hit[0]:
+            return hit[1]
+        generation = _catalog_generation
+    value = load()
+    with _catalog_lock:
+        if generation == _catalog_generation:
+            _catalog_cache[key] = (now + CATALOG_CACHE_TTL, value)
+    return value
+
+
 def add_song(song_id, name, artist, rarity=UNASSIGNED):
     conn = get_connection()
     c = conn.cursor()
@@ -596,6 +731,7 @@ def add_album(album_id, name, artist, artist_id, image):
     c.execute("INSERT OR IGNORE INTO albums (id, name, artist, artist_id, image) VALUES (?, ?, ?, ?, ?)", (album_id, name, artist, artist_id, image))
     conn.commit()
     conn.close()
+    _invalidate_catalog()
 
 def link_song_album(song_id, spotify_song_id, album_id, album_name):
     conn = get_connection()
@@ -603,6 +739,7 @@ def link_song_album(song_id, spotify_song_id, album_id, album_name):
     c.execute("INSERT OR IGNORE INTO song_album (song_id, spotify_song_id, album_id, album_name) VALUES (?, ?, ?, ?)", (song_id, spotify_song_id, album_id, album_name))
     conn.commit()
     conn.close()
+    _invalidate_catalog()
 
 def add_song_to_user(user_id, song_id):
     user_id = _uid(user_id)
@@ -622,13 +759,15 @@ def get_albums_by_artist(artist_name):
     return results  # List of (album_id, album_name)
 
 def get_all_artists():
-    """Get all unique artists from the database"""
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("SELECT DISTINCT artist FROM albums ORDER BY artist")
-    results = c.fetchall()
-    conn.close()
-    return [row[0] for row in results]  # List of artist names
+    """Get all unique artists from the database. Cached; see _catalog_cached."""
+    def load():
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute("SELECT DISTINCT artist FROM albums ORDER BY artist")
+        results = c.fetchall()
+        conn.close()
+        return [row[0] for row in results]
+    return list(_catalog_cached("artists", load))  # List of artist names
 
 def get_album_song_counts(artist):
     """[(album_name, song_count)] for one artist, fullest release first.
@@ -637,19 +776,23 @@ def get_album_song_counts(artist):
     pulling one artist's whole song list to count albums in Python would mean
     shipping 400+ rows per character for a back catalogue like Taylor Swift's.
     """
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("""
-        SELECT albums.name, COUNT(DISTINCT song_album.song_id) AS songs
-        FROM albums
-        JOIN song_album ON song_album.album_id = albums.id
-        WHERE albums.artist = ? COLLATE NOCASE
-        GROUP BY albums.name
-        ORDER BY songs DESC, albums.name ASC
-    """, (artist,))
-    rows = c.fetchall()
-    conn.close()
-    return [(name, n) for name, n in rows]
+    def load():
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute("""
+            SELECT albums.name, COUNT(DISTINCT song_album.song_id) AS songs
+            FROM albums
+            JOIN song_album ON song_album.album_id = albums.id
+            WHERE albums.artist = ? COLLATE NOCASE
+            GROUP BY albums.name
+            ORDER BY songs DESC, albums.name ASC
+        """, (artist,))
+        rows = c.fetchall()
+        conn.close()
+        return [(name, n) for name, n in rows]
+    # Keyed case-insensitively, matching the COLLATE NOCASE lookup: "taylor
+    # swift" and "Taylor Swift" are the same query and share an entry.
+    return list(_catalog_cached(("album_counts", (artist or "").lower()), load))
 
 
 def get_artist_collected_counts():
@@ -690,48 +833,65 @@ def get_artist_favourite_counts():
 def get_artist_overview():
     """Every artist with their album/song counts and up to four cover images.
 
-    Two queries rather than one: pulling "N covers per group" in a single
-    statement needs a window function or LATERAL, and the portable spellings
-    differ between SQLite and Postgres. The albums table is small enough that
-    fetching its (artist, image) pairs and grouping here is cheaper than the
-    complexity, and it keeps the catalog page at 2 queries instead of 1-per-artist.
+    Cached -- this backs /artists and the web catalog, and only changes when an
+    artist is imported or removed.
+
+    The counts are pre-aggregated per table and then joined. The obvious form,
+    COUNT(DISTINCT ...) over albums LEFT JOIN song_album, makes Postgres sort the
+    whole join to de-duplicate it (27ms measured); counting distinct
+    (artist, song) pairs first lets it hash instead (8ms), with identical output.
+
+    The covers query keeps only the first four distinct images per artist in the
+    database, where it used to ship every album (527 rows) and trim in Python.
+    ROW_NUMBER over MIN(name) reproduces the old order exactly: the first time an
+    image appears in (artist, name) order is at its alphabetically-first album.
+    Both statements are standard SQL that SQLite 3.25+ runs unchanged.
     """
-    conn = get_connection()
-    c = conn.cursor()
+    def load():
+        conn = get_connection()
+        c = conn.cursor()
 
-    c.execute("""
-        SELECT albums.artist,
-               COUNT(DISTINCT albums.id) AS album_count,
-               COUNT(DISTINCT song_album.song_id) AS song_count
-        FROM albums
-        LEFT JOIN song_album ON song_album.album_id = albums.id
-        GROUP BY albums.artist
-        ORDER BY albums.artist
-    """)
-    counts = c.fetchall()
+        c.execute("""
+            SELECT a.artist, a.album_count, COALESCE(s.song_count, 0)
+            FROM (SELECT artist, COUNT(*) AS album_count FROM albums GROUP BY artist) a
+            LEFT JOIN (
+                SELECT artist, COUNT(*) AS song_count
+                FROM (SELECT DISTINCT albums.artist AS artist, song_album.song_id
+                      FROM song_album JOIN albums ON albums.id = song_album.album_id) d
+                GROUP BY artist
+            ) s ON s.artist = a.artist
+            ORDER BY a.artist
+        """)
+        counts = c.fetchall()
 
-    c.execute("""
-        SELECT artist, image FROM albums
-        WHERE image IS NOT NULL AND image <> ''
-        ORDER BY artist, name
-    """)
-    covers = {}
-    for artist, image in c.fetchall():
-        bucket = covers.setdefault(artist, [])
-        if len(bucket) < 4 and image not in bucket:
-            bucket.append(image)
+        c.execute("""
+            SELECT artist, image FROM (
+                SELECT artist, image,
+                       ROW_NUMBER() OVER (PARTITION BY artist ORDER BY MIN(name), image) AS rn
+                FROM albums
+                WHERE image IS NOT NULL AND image <> ''
+                GROUP BY artist, image
+            ) t
+            WHERE rn <= 4
+            ORDER BY artist, rn
+        """)
+        covers = {}
+        for artist, image in c.fetchall():
+            covers.setdefault(artist, []).append(image)
 
-    conn.close()
+        conn.close()
+        return [
+            {
+                "artist": artist,
+                "album_count": album_count,
+                "song_count": song_count,
+                "covers": covers.get(artist, []),
+            }
+            for artist, album_count, song_count in counts
+        ]
 
-    return [
-        {
-            "artist": artist,
-            "album_count": album_count,
-            "song_count": song_count,
-            "covers": covers.get(artist, []),
-        }
-        for artist, album_count, song_count in counts
-    ]
+    return [dict(entry, covers=list(entry["covers"]))
+            for entry in _catalog_cached("overview", load)]
 
 def get_artist_collection_stats(artist_name):
     """How much of one artist's catalog players actually hold.
@@ -769,10 +929,12 @@ def get_artist_popularity(artist_name):
     Standard competition ranking: artists tied on copies share a rank. Artists
     with no pulls at all still rank -- they simply tie for last -- so the
     denominator is every artist in the catalog, not just the ones with pulls.
+
+    The artist list comes from the catalogue cache, so only the pull counts --
+    which change on every pull -- cost a round trip.
     """
     conn = get_connection()
     c = conn.cursor()
-
     c.execute("""
         SELECT songs.artist, COUNT(*)
         FROM collections
@@ -780,11 +942,9 @@ def get_artist_popularity(artist_name):
         GROUP BY songs.artist
     """)
     pulls = {row[0]: row[1] for row in c.fetchall()}
-
-    c.execute("SELECT DISTINCT artist FROM albums")
-    artists = [row[0] for row in c.fetchall()]
     conn.close()
 
+    artists = get_all_artists()
     if not artists:
         return {"rank": None, "total": 0, "copies": 0}
 
@@ -805,6 +965,9 @@ def get_song_by_artist(artist_name):
     c = conn.cursor()
     c.execute("SELECT name, id FROM songs WHERE artist = ?", (artist_name,))
     results = c.fetchall()
+    # This used to return without closing, leaving the connection to be handed
+    # back whenever the garbage collector got round to it.
+    conn.close()
     return results  # List of (song_name,)
 
 def get_album_details_by_song(song_id):
@@ -1177,32 +1340,32 @@ def register_user(user_id, xp=0, username=None):
     conn.close()
 
 def get_song_and_album_details(song_name, album_name, artist):
-    """Get song_id, album_id, and album_url by song name, album name, and artist"""
+    """Get song_id, album_id, and album_url by song name, album name, and artist.
+
+    One statement: the album lookup is LEFT JOINed onto the song lookup, so a
+    missing song gives no row (all None) and a found song with a missing album
+    still returns its id and name, exactly as the old two-query form did.
+    """
     conn = get_connection()
     c = conn.cursor()
-    
-    # Find the song ID (case-insensitive search)
-    c.execute("SELECT id, name FROM songs WHERE name = ? COLLATE NOCASE AND artist = ? COLLATE NOCASE", (song_name, artist))
-    song_result = c.fetchone()
-    
-    if not song_result:
-        conn.close()
+    c.execute("""
+        SELECT s.id, s.name, a.id, a.name, a.image
+        FROM (SELECT id, name FROM songs
+              WHERE name = ? COLLATE NOCASE AND artist = ? COLLATE NOCASE
+              LIMIT 1) s
+        LEFT JOIN (SELECT id, name, image FROM albums
+                   WHERE name = ? COLLATE NOCASE AND artist = ? COLLATE NOCASE
+                   LIMIT 1) a ON 1 = 1
+    """, (song_name, artist, album_name, artist))
+    row = c.fetchone()
+    conn.close()
+
+    if not row:
         return None, None, None, None, None  # Song not found
-    
-    song_id = song_result[0]
-    song_name = song_result[1]
-    
-    # Find the album ID and image URL (case-insensitive search)
-    c.execute("SELECT id, name, image FROM albums WHERE name = ? COLLATE NOCASE AND artist = ? COLLATE NOCASE", (album_name, artist))
-    album_result = c.fetchone()
-    
-    if not album_result:
-        conn.close()
+    song_id, song_name, album_id, album_name, album_url = row
+    if album_id is None:
         return song_id, song_name, None, None, None  # Album not found
 
-    album_id, album_name, album_url = album_result
-
-    conn.close()
     print(f"Found song_id: {song_id}, album_id: {album_id}, album_url: {album_url}")
     return song_id, song_name, album_id, album_name, album_url
 
@@ -1339,50 +1502,49 @@ def get_songs_by_artist_and_rarity(artist_name, rarity):
     return results  # List of (song_id, song_name, album_name, rarity)
 
 def remove_songs_by_artist(artist_name):
-    """Remove all songs, albums, and song_album entries for a given artist"""
+    """Remove all songs, albums, and song_album entries for a given artist.
+
+    All-or-nothing: the deletes run in one explicit transaction, because a
+    failure halfway would otherwise leave songs with no albums or collection
+    rows pointing at nothing. The id lists that used to be fetched first are
+    subqueries now, which saves two round trips and cannot go stale -- nothing
+    is removed from songs or albums until the rows referencing them are gone.
+    """
     conn = get_connection()
     c = conn.cursor()
-    
-    try:
-        # Get all song IDs for this artist before deletion
-        c.execute("SELECT id FROM songs WHERE artist = ? COLLATE NOCASE", (artist_name,))
-        song_ids = [row[0] for row in c.fetchall()]
-        
-        # Get all album IDs for this artist before deletion
-        c.execute("SELECT id FROM albums WHERE artist = ? COLLATE NOCASE", (artist_name,))
-        album_ids = [row[0] for row in c.fetchall()]
-        
-        # Remove from song_album table (songs by this artist)
-        if song_ids:
-            placeholders = ','.join(['?' for _ in song_ids])
-            c.execute(f"DELETE FROM song_album WHERE song_id IN ({placeholders})", song_ids)
-            song_album_deletions = c.rowcount
-            # FK enforcement is now ON, so any collections referencing these songs must
-            # go before the parent songs/albums rows can be deleted.
-            c.execute(f"DELETE FROM collections WHERE song_id IN ({placeholders})", song_ids)
-        else:
-            song_album_deletions = 0
-        if album_ids:
-            album_placeholders = ','.join(['?' for _ in album_ids])
-            c.execute(f"DELETE FROM collections WHERE album_id IN ({album_placeholders})", album_ids)
 
-        # Remove from songs table
+    try:
+        _begin(conn)
+        c.execute("""
+            DELETE FROM song_album
+            WHERE song_id IN (SELECT id FROM songs WHERE artist = ? COLLATE NOCASE)
+        """, (artist_name,))
+        song_album_deletions = c.rowcount
+
+        # FK enforcement is on, so any collection rows referencing these songs
+        # or albums must go before the parent rows can be deleted.
+        c.execute("""
+            DELETE FROM collections
+            WHERE song_id IN (SELECT id FROM songs WHERE artist = ? COLLATE NOCASE)
+               OR album_id IN (SELECT id FROM albums WHERE artist = ? COLLATE NOCASE)
+        """, (artist_name, artist_name))
+
         c.execute("DELETE FROM songs WHERE artist = ? COLLATE NOCASE", (artist_name,))
         song_deletions = c.rowcount
-        
-        # Remove from albums table
+
         c.execute("DELETE FROM albums WHERE artist = ? COLLATE NOCASE", (artist_name,))
         album_deletions = c.rowcount
-        
+
         conn.commit()
-        
+        _invalidate_catalog()
+
         return {
             'songs_deleted': song_deletions,
             'albums_deleted': album_deletions,
             'song_album_links_deleted': song_album_deletions,
             'success': True
         }
-        
+
     except Exception as e:
         conn.rollback()
         return {
@@ -1749,33 +1911,29 @@ def get_user_mythic_copy_number(user_id, song_id):
       * collected_at only has one-second resolution, so two claims in the same
         second tie. collections.id breaks the tie, giving the same order
         get_mythic_owners lists them in.
+
+    Both are kept, in one statement: the user's earliest copy is a derived
+    table, so a non-owner produces no row at all, and the count of earlier
+    claims is a subquery against it.
     """
     user_id = _uid(user_id)
     conn = get_connection()
     c = conn.cursor()
-
     c.execute("""
-        SELECT collected_at, id
-        FROM collections
-        WHERE user_id = ? AND song_id = ? AND variant = 'mythic'
-        ORDER BY collected_at ASC, id ASC
-        LIMIT 1
+        SELECT 1 + (SELECT COUNT(*) FROM collections earlier
+                    WHERE earlier.song_id = mine.song_id AND earlier.variant = 'mythic'
+                      AND (earlier.collected_at < mine.collected_at
+                           OR (earlier.collected_at = mine.collected_at
+                               AND earlier.id < mine.id)))
+        FROM (SELECT song_id, collected_at, id
+              FROM collections
+              WHERE user_id = ? AND song_id = ? AND variant = 'mythic'
+              ORDER BY collected_at ASC, id ASC
+              LIMIT 1) mine
     """, (user_id, song_id))
     row = c.fetchone()
-    if not row:
-        conn.close()
-        return None
-
-    claimed_at, row_id = row
-    c.execute("""
-        SELECT COUNT(*) + 1
-        FROM collections
-        WHERE song_id = ? AND variant = 'mythic'
-          AND (collected_at < ? OR (collected_at = ? AND id < ?))
-    """, (song_id, claimed_at, claimed_at, row_id))
-    result = c.fetchone()
     conn.close()
-    return result[0] if result else None
+    return row[0] if row else None
 
 def get_mythic_owners(song_id):
     """Get list of users who own copies of a mythic song, ordered by collection time"""
@@ -1840,47 +1998,67 @@ def get_collection_with_copy_numbers(user_id):
     conn.close()
     return results  # List of (song_name, artist_name, variant, album_name, album_image, copy_number)
 
-def get_available_mythic_songs():
-    """Get all songs that can still be collected as mythics (have less than 3 copies)"""
+def get_available_mythic_songs(max_copies=None):
+    """Songs that can still be collected as mythics (fewer than the cap exist).
+
+    The cap comes from odds.MYTHIC_MAX_COPIES, like every other mythic check.
+    This used to hardcode 3 from when that was the cap, so once it rose to 5 a
+    song with 3 or 4 copies was collectable everywhere except here.
+
+    NOT EXISTS rather than NOT IN: NOT IN yields no rows at all if its subquery
+    ever produces a NULL, and it is no faster.
+    """
+    max_copies = odds.MYTHIC_MAX_COPIES if max_copies is None else max_copies
     conn = get_connection()
     c = conn.cursor()
     c.execute("""
         SELECT s.id, s.name, s.artist
         FROM songs s
-        WHERE s.id NOT IN (
-            SELECT song_id 
-            FROM collections 
-            WHERE variant = 'mythic'
+        WHERE NOT EXISTS (
+            SELECT 1 FROM collections
+            WHERE song_id = s.id AND variant = 'mythic'
             GROUP BY song_id
-            HAVING COUNT(*) >= 3
+            HAVING COUNT(*) >= ?
         )
-    """)
+    """, (max_copies,))
     results = c.fetchall()
     conn.close()
     return results  # List of (song_id, song_name, artist_name)
 
-def get_available_mythic_songs_for_user(user_id):
-    """Get all songs that can still be collected as mythics for a specific user 
-    (have less than 3 copies AND user doesn't already own one)"""
+def get_available_mythic_songs_for_user(user_id, limit=None, max_copies=None):
+    """Songs this user can still be given as a mythic: under the copy cap, and
+    not one they already own.
+
+    `limit` picks that many at random in the database. The mythic swap only ever
+    wanted one, but used to receive the whole eligible catalogue (~1,800 rows)
+    and random.choice it in Python -- ~85ms of transfer for a single song. Each
+    row is equally likely either way. Leave it None for the full list.
+
+    See get_available_mythic_songs for the cap and NOT EXISTS reasoning.
+    """
     user_id = _uid(user_id)
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("""
+    max_copies = odds.MYTHIC_MAX_COPIES if max_copies is None else max_copies
+    sql = """
         SELECT s.id, s.name, s.artist
         FROM songs s
-        WHERE s.id NOT IN (
-            SELECT song_id 
-            FROM collections 
-            WHERE variant = 'mythic'
+        WHERE NOT EXISTS (
+            SELECT 1 FROM collections
+            WHERE song_id = s.id AND variant = 'mythic'
             GROUP BY song_id
-            HAVING COUNT(*) >= 3
+            HAVING COUNT(*) >= ?
         )
-        AND s.id NOT IN (
-            SELECT song_id
-            FROM collections
-            WHERE user_id = ? AND variant = 'mythic'
+        AND NOT EXISTS (
+            SELECT 1 FROM collections
+            WHERE song_id = s.id AND user_id = ? AND variant = 'mythic'
         )
-    """, (user_id,))
+    """
+    params = [max_copies, user_id]
+    if limit is not None:
+        sql += " ORDER BY RANDOM() LIMIT ?"
+        params.append(int(limit))
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute(sql, tuple(params))
     results = c.fetchall()
     conn.close()
     return results  # List of (song_id, song_name, artist_name)
@@ -1927,24 +2105,22 @@ def get_vinyl_count(user_id):
     return result[0] if result else 0
 
 def use_vinyl_pull(user_id):
-    """Use one vinyl pull from user's count. Returns True if successful, False if no pulls left"""
+    """Use one vinyl pull from user's count. Returns True if successful, False if no pulls left.
+
+    One guarded UPDATE. This used to read the count first through
+    get_vinyl_count(), which opened a *second* pooled connection while
+    this one was still held, then updated anyway: the `vinyl_count > 0` guard
+    already refuses an empty balance, and rowcount says which happened. A NULL
+    count fails the guard too, the same answer the COALESCE'd read gave.
+    """
     user_id = _uid(user_id)
     conn = get_connection()
     c = conn.cursor()
-    
-    # Check current count
-    current_count = get_vinyl_count(user_id)
-    if current_count <= 0:
-        conn.close()
-        return False
-    
-    # Decrease count
     c.execute("""
-        UPDATE users 
+        UPDATE users
         SET vinyl_count = vinyl_count - 1
         WHERE id = ? AND vinyl_count > 0
     """, (user_id,))
-    
     success = c.rowcount > 0
     conn.commit()
     conn.close()
@@ -1977,24 +2153,22 @@ def get_sig_vinyl_count(user_id):
     return result[0] if result else 0
 
 def use_sig_vinyl_pull(user_id):
-    """Use one signature vinyl pull from user's count. Returns True if successful, False if no pulls left"""
+    """Use one signature vinyl pull from user's count. Returns True if successful, False if no pulls left.
+
+    One guarded UPDATE. This used to read the count first through
+    get_sig_vinyl_count(), which opened a *second* pooled connection while
+    this one was still held, then updated anyway: the `sig_vinyl_count > 0` guard
+    already refuses an empty balance, and rowcount says which happened. A NULL
+    count fails the guard too, the same answer the COALESCE'd read gave.
+    """
     user_id = _uid(user_id)
     conn = get_connection()
     c = conn.cursor()
-    
-    # Check current count
-    current_count = get_sig_vinyl_count(user_id)
-    if current_count <= 0:
-        conn.close()
-        return False
-    
-    # Decrease count
     c.execute("""
-        UPDATE users 
+        UPDATE users
         SET sig_vinyl_count = sig_vinyl_count - 1
         WHERE id = ? AND sig_vinyl_count > 0
     """, (user_id,))
-    
     success = c.rowcount > 0
     conn.commit()
     conn.close()
@@ -2025,22 +2199,24 @@ def list_latest(limit=10):
     return results
 
 def remove_latest(n=1):
-    """Remove the latest n songs added to the collection across all users"""
+    """Remove the latest n songs added to the collection across all users.
+
+    One DELETE with the selection as a subquery, so the rows chosen and the rows
+    removed cannot differ -- a pull landing between a separate SELECT and DELETE
+    used to be able to shift which ones "the latest" meant.
+    """
     conn = get_connection()
     c = conn.cursor()
-    # Get the latest n collection ids
     c.execute("""
-        SELECT id FROM collections
-        ORDER BY collected_at DESC
-        LIMIT ?
+        DELETE FROM collections
+        WHERE id IN (SELECT id FROM collections
+                     ORDER BY collected_at DESC
+                     LIMIT ?)
     """, (n,))
-    ids = [row[0] for row in c.fetchall()]
-    if ids:
-        placeholders = ','.join(['?' for _ in ids])
-        c.execute(f"DELETE FROM collections WHERE id IN ({placeholders})", ids)
-        conn.commit()
+    removed = c.rowcount
+    conn.commit()
     conn.close()
-    return len(ids)  # Number of items
+    return removed  # Number of items
 
 def get_songs_with_ids_by_artist(artist_name):
     """Get all songs by an artist with id, rarity, album name, and track count (for admin/catalog views)"""
@@ -2098,25 +2274,22 @@ def get_user_xp_rank(user_id):
 
     Counts the users strictly ahead rather than materialising the whole table,
     matching the tie-break of get_top_users_by_xp so a user's own rank agrees
-    with where they appear in the list.
+    with where they appear in the list. The user's own XP is read in the same
+    statement, so no row at all means they are not registered.
     """
     user_id = _uid(user_id)
     conn = get_connection()
     c = conn.cursor()
-    c.execute("SELECT COALESCE(xp, 0) FROM users WHERE id = ?", (user_id,))
-    row = c.fetchone()
-    if row is None:
-        conn.close()
-        return None
-    xp = row[0]
     c.execute("""
-        SELECT COUNT(*) FROM users
-        WHERE COALESCE(xp, 0) > ?
-           OR (COALESCE(xp, 0) = ? AND id < ?)
-    """, (xp, xp, user_id))
-    ahead = c.fetchone()[0]
+        SELECT 1 + (SELECT COUNT(*) FROM users ahead
+                    WHERE COALESCE(ahead.xp, 0) > COALESCE(me.xp, 0)
+                       OR (COALESCE(ahead.xp, 0) = COALESCE(me.xp, 0) AND ahead.id < me.id))
+        FROM users me
+        WHERE me.id = ?
+    """, (user_id,))
+    row = c.fetchone()
     conn.close()
-    return ahead + 1
+    return row[0] if row else None
 
 
 def unregister_user(user_id):
@@ -2393,59 +2566,68 @@ def set_favorite_artist(user_id, artist):
 
 
 def get_user_profile(user_id):
-    """Everything /profile needs, in four queries rather than one per stat."""
+    """Everything /profile needs, in one statement.
+
+    This used to be five queries -- the user row, then four separate passes over
+    the same collection -- which with the transaction wrapper cost seven round
+    trips. Each aggregate is now a derived table cross-joined onto the user row
+    (`ON 1 = 1`, which SQLite and Postgres both accept), so the database does the
+    same four scans and the network carries one request.
+
+    The result has one row per rarity the user holds. A user with no cards still
+    gets exactly one row, with the rarity columns NULL -- told apart from a real
+    NULL-rarity group by its count being NULL rather than a number.
+    """
     user_id = _uid(user_id)
     conn = get_connection()
     c = conn.cursor()
-
     c.execute("""
-        SELECT username, xp, vinyl_count, sig_vinyl_count,
-               pinned_collection_id, favorite_artist
-        FROM users WHERE id = ?
-    """, (user_id,))
-    row = c.fetchone()
-    if not row:
-        conn.close()
-        return None
-    username, xp, vinyl, sig_vinyl, pinned_id, favorite = row
-
-    # Totals plus the rarity spread, in one pass over the user's collection.
-    c.execute("""
-        SELECT COUNT(*), COUNT(DISTINCT collections.song_id),
-               SUM(CASE WHEN collections.variant = 'mythic' THEN 1 ELSE 0 END)
-        FROM collections
-        JOIN songs ON collections.song_id = songs.id
-        WHERE collections.user_id = ?
-    """, (user_id,))
-    cards, unique_songs, mythics = c.fetchone() or (0, 0, 0)
-
-    c.execute("""
-        SELECT songs.rarity, COUNT(*)
-        FROM collections
-        JOIN songs ON collections.song_id = songs.id
-        WHERE collections.user_id = ?
-        GROUP BY songs.rarity
-    """, (user_id,))
-    rarity_counts = {r: n for r, n in c.fetchall()}
-
-    # Most-owned artist: earned, as opposed to the chosen favorite above.
-    c.execute("""
-        SELECT songs.artist, COUNT(*) AS n
-        FROM collections
-        JOIN songs ON collections.song_id = songs.id
-        WHERE collections.user_id = ?
-        GROUP BY songs.artist
-        ORDER BY n DESC, songs.artist ASC
-        LIMIT 1
-    """, (user_id,))
-    top = c.fetchone()
-
-    c.execute("""
-        SELECT MIN(collected_at) FROM collections WHERE user_id = ?
-    """, (user_id,))
-    since = (c.fetchone() or (None,))[0]
-
+        SELECT u.username, u.xp, u.vinyl_count, u.sig_vinyl_count,
+               u.pinned_collection_id, u.favorite_artist,
+               t.cards, t.unique_songs, t.mythics,
+               ta.artist, ta.n,
+               s.since,
+               r.rarity, r.n
+        FROM users u
+        LEFT JOIN (
+            SELECT COUNT(*) AS cards,
+                   COUNT(DISTINCT collections.song_id) AS unique_songs,
+                   SUM(CASE WHEN collections.variant = 'mythic' THEN 1 ELSE 0 END) AS mythics
+            FROM collections
+            JOIN songs ON collections.song_id = songs.id
+            WHERE collections.user_id = ?
+        ) t ON 1 = 1
+        LEFT JOIN (
+            -- Most-owned artist: earned, as opposed to the chosen favorite.
+            SELECT songs.artist AS artist, COUNT(*) AS n
+            FROM collections
+            JOIN songs ON collections.song_id = songs.id
+            WHERE collections.user_id = ?
+            GROUP BY songs.artist
+            ORDER BY n DESC, songs.artist ASC
+            LIMIT 1
+        ) ta ON 1 = 1
+        LEFT JOIN (
+            SELECT MIN(collected_at) AS since FROM collections WHERE user_id = ?
+        ) s ON 1 = 1
+        LEFT JOIN (
+            SELECT songs.rarity AS rarity, COUNT(*) AS n
+            FROM collections
+            JOIN songs ON collections.song_id = songs.id
+            WHERE collections.user_id = ?
+            GROUP BY songs.rarity
+        ) r ON 1 = 1
+        WHERE u.id = ?
+    """, (user_id, user_id, user_id, user_id, user_id))
+    rows = c.fetchall()
     conn.close()
+    if not rows:
+        return None
+
+    (username, xp, vinyl, sig_vinyl, pinned_id, favorite,
+     cards, unique_songs, mythics, top_artist, top_count, since, _, _) = rows[0]
+    rarity_counts = {rarity: n for *_, rarity, n in rows if n is not None}
+
     return {
         "user_id": user_id,
         "username": username,
@@ -2458,28 +2640,31 @@ def get_user_profile(user_id):
         "unique_songs": unique_songs or 0,
         "mythics": mythics or 0,
         "rarity_counts": rarity_counts,
-        "top_artist": top[0] if top else None,
-        "top_artist_count": top[1] if top else 0,
+        "top_artist": top_artist,
+        "top_artist_count": top_count or 0,
         "collecting_since": since,
     }
 
 
 def get_artist_completion(user_id, artist):
-    """How much of one artist's catalog a user holds: (owned, total)."""
+    """How much of one artist's catalog a user holds: (owned, total).
+
+    Both counts as scalar subqueries of one SELECT, so this is a single round
+    trip rather than two.
+    """
     user_id = _uid(user_id)
     conn = get_connection()
     c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM songs WHERE artist = ? COLLATE NOCASE", (artist,))
-    total = (c.fetchone() or (0,))[0] or 0
     c.execute("""
-        SELECT COUNT(DISTINCT collections.song_id)
-        FROM collections
-        JOIN songs ON collections.song_id = songs.id
-        WHERE collections.user_id = ? AND songs.artist = ? COLLATE NOCASE
-    """, (user_id, artist))
-    owned = (c.fetchone() or (0,))[0] or 0
+        SELECT (SELECT COUNT(DISTINCT collections.song_id)
+                FROM collections
+                JOIN songs ON collections.song_id = songs.id
+                WHERE collections.user_id = ? AND songs.artist = ? COLLATE NOCASE),
+               (SELECT COUNT(*) FROM songs WHERE artist = ? COLLATE NOCASE)
+    """, (user_id, artist, artist))
+    owned, total = c.fetchone() or (0, 0)
     conn.close()
-    return owned, total
+    return owned or 0, total or 0
 
 
 def get_user_collection_artists(user_id):

@@ -205,13 +205,15 @@ def _resolve_mythic(user_id, variants, songs, ids, albums, artists):
 
         # Already maxed out, or this player owns it: swap in one they can claim.
         if not state['can_collect'] or state['user_owns']:
-            available = get_available_mythic_songs_for_user(user_id)
+            # Drawn at random in the database: this used to fetch every
+            # eligible song (~1,800 rows) to random.choice one of them.
+            available = get_available_mythic_songs_for_user(user_id, limit=1)
             if not available:
                 return None
             # Read off the state we already have -- this used to re-run the
             # copy-count query just to word a log line.
             reason = "maxed out" if not state['can_collect'] else "already owned"
-            song_id, song_name, artist = random.choice(available)
+            song_id, song_name, artist = available[0]
             album_id, album_name, album_url = get_random_album(song_id)
             state = get_mythic_pull_state(song_id, user_id)
             event(log, "mythic swapped", "%s -> %s by %s", reason, song_name, artist)
