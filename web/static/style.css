@@ -928,6 +928,28 @@ label { font-size: .87rem; font-weight: 500; color: var(--fg-2); }
 }
 .import-pending { display: flex; align-items: center; gap: .35rem; color: var(--accent); }
 
+/* ---- Import job ---------------------------------------------------------- */
+
+.import-job { padding: .9rem 1rem; }
+.import-status { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+.import-phase { display: inline-flex; align-items: center; gap: .4rem; font-weight: 600; }
+.import-phase-icon { display: inline-flex; }
+.import-job[data-state="done"] .import-phase { color: var(--success); }
+.import-job[data-state="failed"] .import-phase { color: var(--danger); }
+.import-count { margin-left: auto; color: var(--muted); font-size: .86rem; }
+.import-meter > span { background: var(--accent); transition: width .4s ease; }
+.import-job[data-state="done"] .import-meter > span { background: var(--success); }
+.import-job[data-state="failed"] .import-meter > span { background: var(--danger); }
+.import-eta { margin: 0; min-height: 1.2em; }
+.import-actions { display: flex; gap: .5rem; flex-wrap: wrap; margin-top: .8rem; }
+.import-problems { padding: .7rem 1rem; }
+.import-errors { margin: 0; padding-left: 1.1rem; color: var(--fg-2); font-size: .86rem; }
+.import-running {
+  list-style: none; margin: .6rem 0 0; padding: 0;
+  display: flex; flex-direction: column; gap: .3rem; font-size: .86rem;
+}
+.import-running a { display: inline-flex; align-items: center; gap: .35rem; }
+
 /* Busy submit: the label is hidden in place, so the button never resizes. */
 button[data-busy="1"] { position: relative; color: transparent; pointer-events: none; }
 button[data-busy="1"] > * { visibility: hidden; }

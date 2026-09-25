@@ -8,7 +8,6 @@ from discord.ext import commands
 from math import ceil
 
 from utils import aesthetics
-from utils.errors import report_unhandled
 from utils.vinyl import find_signature, signature_filename, signature_files
 
 log = logging.getLogger("grails.mod")
@@ -23,7 +22,7 @@ class ModCog(commands.Cog):
         """List the n latest songs pulled (default 10, 25 per page)"""
         try:
             # Fetch the latest songs
-            latest_songs = list_latest(limit=n)
+            latest_songs = await asyncio.to_thread(list_latest, limit=n)
             if not latest_songs:
                 await ctx.send("No songs found in the collection.")
                 return
@@ -65,7 +64,7 @@ class ModCog(commands.Cog):
     async def remove_latest(self, ctx, n: int = 1):
         """Remove the n latest songs pulled"""
         try:
-            removed_count = remove_latest(n=n)
+            removed_count = await asyncio.to_thread(remove_latest, n=n)
             await ctx.send(f"Successfully removed {removed_count} song(s) from the collection.")
         except Exception as e:
             await ctx.send(f"An error occurred: {e}")
@@ -75,11 +74,11 @@ class ModCog(commands.Cog):
     async def give_xp(self, ctx, user: discord.User, xp: int):
         """Give a user x XP (x can be negative)"""
         try:
-            if not user_exists(user.id):
+            if not await asyncio.to_thread(user_exists, user.id):
                 await ctx.send(f"❌ User {user.mention} is not registered.")
                 return
 
-            if add_user_xp(user.id, xp):
+            if await asyncio.to_thread(add_user_xp, user.id, xp):
                 await ctx.send(f"✅ Successfully gave {xp} XP to {user.mention}.")
             else:
                 await ctx.send(f"❌ Failed to update XP for {user.mention}.")
@@ -181,13 +180,6 @@ class ModCog(commands.Cog):
         if chunk:
             embed.add_field(name=name if first else "\u200b",
                             value=chunk + (f"\n{hint}" if hint else ""), inline=False)
-
-    @sigcheck.error
-    async def sigcheck_error(self, ctx, error):
-        if isinstance(error, commands.MissingRole):
-            await ctx.send("You need the **grails-admin** role to use that.")
-            return
-        await report_unhandled(log, ctx, error, command="sigcheck")
 
 async def setup(bot):
     await bot.add_cog(ModCog(bot))

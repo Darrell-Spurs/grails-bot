@@ -1,14 +1,12 @@
 # pip install pillow requests numpy
-import io
 import math
 import os
 import unicodedata
-from urllib import response
-import requests
 import numpy as np
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageOps
 from io import BytesIO
 from utils import aesthetics
+from utils.artwork import center_square, fetch_image
 
 # Resolved from this file rather than the working directory, so signature art
 # still loads when the process is started from a different cwd.
@@ -59,17 +57,9 @@ def signature_files():
 
 
 def _download_image(url: str, timeout: int = 15) -> Image.Image:
-    response = requests.get(url)
-    img = Image.open(BytesIO(response.content)).convert("RGB").resize((300 * SCALE, 300 * SCALE))
-    return img
-
-def _center_crop_square(img: Image.Image) -> Image.Image:
-    """Crop the longest dimension to make the image square."""
-    w, h = img.size
-    side = min(w, h)
-    left = (w - side) // 2
-    top = (h - side) // 2
-    return img.crop((left, top, left + side, top + side))
+    # `timeout` used to be accepted and then never passed to requests.get, so a
+    # stalled CDN could hang a vinyl pull indefinitely.
+    return fetch_image(url, timeout=timeout).resize((300 * SCALE, 300 * SCALE))
 
 def _circle_mask(size: int, radius: int, blur: float = 1.5) -> Image.Image:
     """Create a soft-edged circular alpha mask."""
@@ -268,7 +258,7 @@ def vinyl_static_sig_bytes(url, artist, output_size=500, rarity="default",
     Falls back to the unsigned disc when the artist has no signature art, which
     is what /view should do rather than fail.
     """
-    art = _center_crop_square(_download_image(url))
+    art = center_square(_download_image(url))
     art = art.resize((output_size, output_size), Image.LANCZOS)
     layers = _build_static_vinyl_layers(output_size, rarity, label_ratio, hole_ratio)
 
@@ -313,7 +303,7 @@ def vinyl_art_from_url(
     """
     # 1) Fetch + square-crop the art
     art = _download_image(url)
-    art = _center_crop_square(art)
+    art = center_square(art)
     art = art.resize((output_size, output_size), Image.LANCZOS)
 
     # 2) Base canvas
@@ -398,7 +388,7 @@ def vinyl_gif_art_from_url(
         raise ValueError("output_path or return_bytes is required for GIF generation")
 
     art = _download_image(url)
-    art = _center_crop_square(art)
+    art = center_square(art)
     art = art.resize((output_size, output_size), Image.LANCZOS)
 
     layers = _build_static_vinyl_layers(output_size, rarity, label_ratio, hole_ratio)
@@ -435,7 +425,7 @@ def vinyl_gif_sig_art_from_url(
         raise ValueError("output_path or return_bytes is required for GIF generation")
 
     art = _download_image(url)
-    art = _center_crop_square(art)
+    art = center_square(art)
     art = art.resize((output_size, output_size), Image.LANCZOS)
 
     signature = Image.open(signature_path).convert("RGBA")

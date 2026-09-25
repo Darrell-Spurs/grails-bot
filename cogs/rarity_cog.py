@@ -1,9 +1,10 @@
+import asyncio
 import sys, os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import discord
 from discord.ext import commands
-from db import get_song_rarity_counts_by_artist, get_songs_by_artist_and_rarity, get_all_artists
+from db import get_song_rarity_counts_by_artist, get_songs_by_artist_and_rarity, find_artist
 from utils import aesthetics
 
 # ✅ Interactive View for song list with pagination
@@ -102,6 +103,13 @@ class SongListView(discord.ui.View):
         for item in self.children:
             item.disabled = True
 
+def _artist_and(query, artist_name, *args):
+    """(artist, query(artist, *args)) with the artist resolved case-insensitively,
+    or (None, None) when there is no such artist."""
+    artist = find_artist(artist_name)
+    return (artist, query(artist, *args)) if artist else (None, None)
+
+
 class RarityCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -120,21 +128,14 @@ class RarityCog(commands.Cog):
                           "**Example:** `.rarity Taylor Swift`")
             return
         
-        # Check if artist exists in database
-        all_artists = get_all_artists()
-        artist_found = None
-        for artist in all_artists:
-            if artist.lower() == artist_name.lower():
-                artist_found = artist
-                break
-        
+        # Find the artist and read their rarity counts in one thread hop
+        artist_found, rarity_counts = await asyncio.to_thread(
+            _artist_and, get_song_rarity_counts_by_artist, artist_name)
+
         if not artist_found:
             await ctx.send(f"❌ **Artist not found!**\n"
                           f"Could not find artist `{artist_name}` in the database.")
             return
-        
-        # Get rarity counts for the artist
-        rarity_counts = get_song_rarity_counts_by_artist(artist_found)
         
         if not rarity_counts:
             await ctx.send(f"❌ **No songs found!**\n"
@@ -217,21 +218,14 @@ class RarityCog(commands.Cog):
                 "b": "basic"
             }.get(rarity.lower(), rarity)
         
-        # Check if artist exists in database
-        all_artists = get_all_artists()
-        artist_found = None
-        for artist in all_artists:
-            if artist.lower() == artist_name.lower():
-                artist_found = artist
-                break
-        
+        # Find the artist and read their songs of that rarity in one thread hop
+        artist_found, songs = await asyncio.to_thread(
+            _artist_and, get_songs_by_artist_and_rarity, artist_name, rarity.lower())
+
         if not artist_found:
             await ctx.send(f"❌ **Artist not found!**\n"
                           f"Could not find artist `{artist_name}` in the database.")
             return
-        
-        # Get songs of the specified rarity for the artist
-        songs = get_songs_by_artist_and_rarity(artist_found, rarity.lower())
         
         if not songs:
             await ctx.send(f"❌ **No {rarity.lower()} songs found!**\n"
@@ -276,29 +270,6 @@ class RarityCog(commands.Cog):
 
     def _get_rarity_color(self, rarity):
         return discord.Color(aesthetics.rarity_colour_int(rarity))
-
-    @rarity.error
-    async def rarity_error(self, ctx, error):
-        if isinstance(error, commands.MissingRole):
-            await ctx.send("❌ You need the 'grails-admin' role to use this command!")
-        elif isinstance(error, commands.MissingRequiredArgument):
-            await ctx.send("❌ **Missing artist name!**\n"
-                          "**Usage:** `.rarity <artist_name>`\n"
-                          "**Example:** `.rarity Taylor Swift`")
-        else:
-            raise error
-
-    @showrarity.error
-    async def showrarity_error(self, ctx, error):
-        if isinstance(error, commands.MissingRole):
-            await ctx.send("❌ You need the 'grails-admin' role to use this command!")
-        elif isinstance(error, commands.MissingRequiredArgument):
-            await ctx.send("❌ **Missing arguments!**\n"
-                          "**Usage:** `.showrarity <artist_name> <rarity>`\n"
-                          "**Valid rarities:** `ultimate`, `legendary`, `elite`, `unique`, `basic`\n"
-                          "**Example:** `.showrarity Taylor Swift legendary`")
-        else:
-            raise error
 
 async def setup(bot):
     await bot.add_cog(RarityCog(bot))

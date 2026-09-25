@@ -1,5 +1,6 @@
 import os, sys
 import asyncio
+import time
 import discord
 from discord.ext import commands
 
@@ -7,9 +8,70 @@ from discord.ext import commands
 sys.path.insert(0,
                 os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from utils.spotify_utils import get_access_token
-from utils.helpers import save_albums_to_db, add_songs_to_db, add_artist_to_db
-from db import remove_songs_by_artist, get_all_artists
+from db import remove_songs_by_artist, find_artist
+from utils import artist_import
+
+# How often the progress message is edited. Discord rate-limits edits, and a
+# line that changes faster than this cannot be read anyway.
+PROGRESS_EDIT_SECONDS = 2
+BAR_WIDTH = 10
+
+
+def progress_text(snap):
+    """The live status block for a running import (see utils/artist_import.py)."""
+    lines = [f"📥 **Importing** `{snap['artist'] or snap['query']}`"]
+    phase = snap["phase"]
+    if phase == "tracks" and snap["total"]:
+        filled = round(BAR_WIDTH * snap["done"] / snap["total"])
+        line = (f"{'▰' * filled}{'▱' * (BAR_WIDTH - filled)}  "
+                f"{snap['done']} / {snap['total']} releases  ·  {snap['phase_label']}")
+        if snap["eta"]:
+            line += f"  ·  ~{snap['eta']}s left"
+        lines.append(line)
+    elif phase == "albums":
+        lines.append(f"⏳ {snap['phase_label']}…  {snap['done']} found")
+    else:
+        lines.append(f"⏳ {snap['phase_label']}…")
+    if sum(snap["releases"].values()):
+        lines.append(f"{snap['releases']['album']} albums · {snap['releases']['single']} singles"
+                     f" · {sum(snap['tracks'].values())} tracks so far")
+    if snap["errors"]:
+        lines.append(f"⚠️ {len(snap['errors'])} problem(s) so far — see the summary")
+    return "\n".join(lines)
+
+
+def result_embed(snap):
+    """The finished import: what landed, or why it did not."""
+    if snap["phase"] != "done":
+        embed = discord.Embed(
+            title="❌ Error Adding Artist",
+            description=f"Failed to add **{snap['artist'] or snap['query']}** to the database.",
+            color=discord.Color.red())
+        embed.add_field(name="Error Details",
+                        value=f"```{(snap['errors'] or ['unknown error'])[-1][:1000]}```",
+                        inline=False)
+        embed.set_footer(text="Please check the logs for more details.")
+        return embed
+
+    result, releases, tracks = snap["result"], snap["releases"], snap["tracks"]
+    embed = discord.Embed(
+        title="✅ Artist Added Successfully!",
+        description=f"**{snap['artist']}** has been processed and added to the database.",
+        color=discord.Color.green())
+    embed.add_field(name="📀 Albums",
+                    value=f"`{releases['album']}` albums\n`{tracks['album']}` songs", inline=True)
+    embed.add_field(name="🎵 Singles",
+                    value=f"`{releases['single']}` albums\n`{tracks['single']}` songs", inline=True)
+    embed.add_field(name="📊 Total",
+                    value=f"`{result['tracks']}` songs\n`{result['new_songs']}` new to the database",
+                    inline=True)
+    if snap["errors"]:
+        shown = "\n".join(f"• {e[:180]}" for e in snap["errors"][:5])
+        more = f"\n…and {len(snap['errors']) - 5} more" if len(snap["errors"]) > 5 else ""
+        embed.add_field(name="⚠️ Skipped", value=shown + more, inline=False)
+    embed.set_footer(text=f"Took {snap['elapsed']:.0f}s · new songs start unassigned: "
+                          f"tier them with .list and .assign before they can drop")
+    return embed
 
 
 class AddArtistCog(commands.Cog):
@@ -17,98 +79,47 @@ class AddArtistCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @commands.command(aliases=['aa'])
+    @commands.command(aliases=['aa'], extras={
+        "missing_arg": "❌ **Missing artist name!**\n"
+                       "**Usage:** `.addartist <Artist Name>`\n"
+                       "**Example:** `.addartist Taylor Swift`",
+    })
     @commands.has_role("grails-admin")
     async def addartist(self, ctx, *, artist_name: str):
         """Add an artist's albums and songs to the database
         Usage: .addartist <Artist Name>
         Example: .addartist Taylor Swift
         """
+        # The import runs as a job on its own thread (utils/artist_import.py);
+        # this only watches it, editing one message as it moves along. The
+        # same job is what the web panel's import page shows.
+        job, started = artist_import.start_import(
+            artist_name, requested_by=str(ctx.author), source="discord")
+        note = "" if started else "\n*Already being imported — following that import here.*"
+        message = await ctx.send(progress_text(job.snapshot()) + note)
 
-        # Send initial message to show the command is processing
-        processing_msg = await ctx.send(
-            f"🎵 **Processing artist:** `{artist_name}`\n⏳ This may take a moment..."
-        )
+        shown = None
+        next_edit = time.monotonic() + PROGRESS_EDIT_SECONDS
+        while not job.finished.is_set():
+            await asyncio.sleep(0.25)
+            if time.monotonic() < next_edit:
+                continue
+            next_edit = time.monotonic() + PROGRESS_EDIT_SECONDS
+            text = progress_text(job.snapshot()) + note
+            if text != shown:
+                shown = text
+                try:
+                    await message.edit(content=text)
+                except discord.HTTPException:
+                    pass    # a missed progress edit is not worth failing over
 
-        try:
-            print(f"\n--- Processing {artist_name} ---")
+        await message.edit(content=None, embed=result_embed(job.snapshot()))
 
-            # Process both albums and singles
-            album_details = await add_artist_to_db(artist_name, "album")
-
-            # Update progress message
-            await processing_msg.edit(
-                content=
-                f"*Processing artist:** `{album_details['artist_name']}`\n✅ Albums processed\n⏳ Now processing singles..."
-            )
-
-            single_details = await add_artist_to_db(
-                album_details['artist_name'], "single")
-
-            # Calculate totals
-            total_albums = album_details['albums_saved'] + single_details[
-                'albums_saved']
-            total_songs = album_details['songs_saved'] + single_details[
-                'songs_saved']
-            corrected_name = album_details['artist_name']
-
-            # Create detailed success embed
-            embed = discord.Embed(
-                title="✅ Artist Added Successfully!",
-                description=
-                f"**{corrected_name}** has been processed and added to the database.",
-                color=discord.Color.green())
-
-            # Add detailed breakdown
-            embed.add_field(
-                name="📀 Albums",
-                value=
-                f"`{album_details['albums_saved']}` albums\n`{album_details['songs_saved']}` songs",
-                inline=True)
-            embed.add_field(
-                name="🎵 Singles",
-                value=
-                f"`{single_details['albums_saved']}` albums\n`{single_details['songs_saved']}` songs",
-                inline=True)
-            embed.add_field(
-                name="📊 Total",
-                value=f"`{total_songs}` songs added to the database",
-                inline=True)
-
-            embed.set_footer(
-                text="All songs and albums are now available for pulls!")
-
-            await processing_msg.edit(content="", embed=embed)
-
-        except Exception as e:
-            print(f"Error processing {artist_name}: {str(e)}")
-
-            error_embed = discord.Embed(
-                title="❌ Error Adding Artist",
-                description=f"Failed to add **{artist_name}** to the database.",
-                color=discord.Color.red())
-            error_embed.add_field(name="Error Details",
-                                  value=f"```{str(e)[:1000]}```",
-                                  inline=False)
-            error_embed.set_footer(
-                text="Please check the logs for more details.")
-
-            await processing_msg.edit(content="", embed=error_embed)
-
-    @addartist.error
-    async def addartist_error(self, ctx, error):
-        if isinstance(error, commands.MissingRole):
-            await ctx.send(
-                "❌ You need the 'grails-admin' role to use this command!")
-        elif isinstance(error, commands.MissingRequiredArgument):
-            await ctx.send("❌ **Missing artist name!**\n"
-                           "**Usage:** `.addartist <Artist Name>`\n"
-                           "**Example:** `.addartist Taylor Swift`")
-        else:
-            await ctx.send(f"❌ **An error occurred:** {str(error)}")
-            raise error
-
-    @commands.command(aliases=['ra'])
+    @commands.command(aliases=['ra'], extras={
+        "missing_arg": "❌ **Missing artist name!**\n"
+                       "**Usage:** `.removeartist <Artist Name>`\n"
+                       "**Example:** `.removeartist Taylor Swift`",
+    })
     @commands.has_role("grails-admin")
     async def removeartist(self, ctx, *, artist_name: str):
         """Remove an artist and all their songs/albums from the database
@@ -117,12 +128,7 @@ class AddArtistCog(commands.Cog):
         """
 
         # Check if artist exists in database
-        all_artists = get_all_artists()
-        artist_found = None
-        for artist in all_artists:
-            if artist.lower() == artist_name.lower():
-                artist_found = artist
-                break
+        artist_found = await asyncio.to_thread(find_artist, artist_name)
 
         if not artist_found:
             await ctx.send(
@@ -195,7 +201,7 @@ class AddArtistCog(commands.Cog):
 
                 try:
                     # Remove the artist from database
-                    result = remove_songs_by_artist(artist_found)
+                    result = await asyncio.to_thread(remove_songs_by_artist, artist_found)
 
                     if result['success']:
                         # Create success embed
@@ -282,20 +288,6 @@ class AddArtistCog(commands.Cog):
                 await ctx.send(
                     f"⏰ **Timeout.** Removal of `{artist_found}` was cancelled due to no response."
                 )
-
-    @removeartist.error
-    async def removeartist_error(self, ctx, error):
-        if isinstance(error, commands.MissingRole):
-            await ctx.send(
-                "❌ You need the 'grails-admin' role to use this command!")
-        elif isinstance(error, commands.MissingRequiredArgument):
-            await ctx.send("❌ **Missing artist name!**\n"
-                           "**Usage:** `.removeartist <Artist Name>`\n"
-                           "**Example:** `.removeartist Taylor Swift`")
-        else:
-            await ctx.send(f"❌ **An error occurred:** {str(error)}")
-            raise error
-
 
 async def setup(bot):
     await bot.add_cog(AddArtistCog(bot))

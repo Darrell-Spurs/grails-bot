@@ -541,6 +541,84 @@
     });
   });
 
+  /* ---- Import progress --------------------------------------------------- */
+  // The import page arrives fully rendered from the job as it stood; this keeps
+  // it current by polling the job until it finishes.
+  var importJob = document.querySelector("[data-import-url]");
+  if (importJob) {
+    var importUrl = importJob.getAttribute("data-import-url");
+    var find = function (sel) { return document.querySelector(sel); };
+    var setText = function (sel, text) { var el = find(sel); if (el) el.textContent = text; };
+
+    var renderImport = function (job) {
+      var state = job.active ? "active" : job.phase;
+      importJob.setAttribute("data-state", state);
+      importJob.querySelectorAll("[data-phase-icon]").forEach(function (el) {
+        el.hidden = el.getAttribute("data-phase-icon") !== state;
+      });
+      var label = job.phase_label || "";
+      setText("[data-import-phase]", label.charAt(0).toUpperCase() + label.slice(1));
+      setText("[data-import-count]",
+              job.phase === "tracks" && job.total ? job.done + " / " + job.total + " releases" : "");
+      setText("[data-import-eta]", job.eta ? "About " + job.eta + "s left" : "");
+      var bar = find("[data-import-bar]");
+      if (bar) bar.style.width = job.percent + "%";
+      var meter = importJob.querySelector("[role=progressbar]");
+      if (meter) meter.setAttribute("aria-valuenow", job.percent);
+      if (job.artist) setText("[data-import-title]", job.artist);
+      setText('[data-stat="albums"]', job.releases.album);
+      setText('[data-stat="singles"]', job.releases.single);
+      setText('[data-stat="tracks"]', job.tracks.album + job.tracks.single);
+      setText('[data-stat="new"]', job.result ? job.result.new_songs : "—");
+
+      var problems = find("[data-import-problems]");
+      var list = find("[data-import-errors]");
+      if (problems && list) {
+        problems.hidden = !job.errors.length;
+        list.textContent = "";
+        job.errors.forEach(function (text) {
+          var li = document.createElement("li");
+          li.textContent = text;
+          list.appendChild(li);
+        });
+      }
+
+      var actions = find("[data-import-actions]");
+      var open = find("[data-import-open]");
+      if (actions) actions.hidden = job.phase !== "done";
+      if (open && job.artist_url) {
+        open.href = job.artist_url;
+        open.textContent = "Open " + job.artist;
+      }
+    };
+
+    var pollImport = function () {
+      fetch(importUrl, { headers: { Accept: "application/json" }, credentials: "same-origin" })
+        .then(function (res) {
+          // A redirect means the session ended and we were sent to the login.
+          if (res.redirected) throw new Error("login");
+          if (res.status === 404) throw new Error("gone");
+          if (!res.ok) throw new Error("retry");
+          return res.json();
+        })
+        .then(function (job) {
+          renderImport(job);
+          if (job.active) setTimeout(pollImport, 1000);
+        })
+        .catch(function (err) {
+          var why = err && err.message;
+          if (why === "gone") {
+            setText("[data-import-phase]", "This import is no longer available");
+          } else if (why === "login") {
+            setText("[data-import-phase]", "Signed out — refresh the page to log in again");
+          } else {
+            setTimeout(pollImport, 3000);   // a blip: try again a little later
+          }
+        });
+    };
+    if (importJob.getAttribute("data-state") === "active") setTimeout(pollImport, 1000);
+  }
+
   /* ---- "/" focuses the page search --------------------------------------- */
   document.addEventListener("keydown", function (e) {
     if (e.key !== "/" || e.ctrlKey || e.metaKey || e.altKey) return;

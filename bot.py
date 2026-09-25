@@ -19,7 +19,8 @@ import discord
 from discord.ext import commands
 from db import init_db, user_exists
 from utils import aesthetics
-from utils.command_types import NotRegistered, PrefixNotAllowed, SlashNotAllowed
+from utils.command_types import NotRegistered
+from utils.errors import handle_command_error
 from utils.logsetup import event, setup_logging
 
 # Console gets the aligned, coloured format; the file gets the same layout with
@@ -145,7 +146,7 @@ async def _require_registration(ctx):
     if _is_admin_command(ctx.command):
         return
     try:
-        registered = user_exists(ctx.author.id)
+        registered = await asyncio.to_thread(user_exists, ctx.author.id)
     except Exception:
         log.exception("registration check failed for %s", ctx.author.id)
         return
@@ -155,39 +156,13 @@ async def _require_registration(ctx):
 
 @bot.event
 async def on_command_error(ctx, error):
-    """Bot-wide fallback.
+    """Every command error, for every command, goes through one handler.
 
-    discord.py only reaches this for commands without their own handler, so it
-    complements the per-cog ones rather than replacing them. Two jobs: explain
-    that a slash-only command was typed with the prefix, and make sure nothing
-    else disappears silently.
+    Commands no longer carry their own `.error` handlers; what used to differ
+    between them -- the usage text -- is in each command's `extras`. See
+    utils/errors.py.
     """
-    if isinstance(error, PrefixNotAllowed):
-        # await ctx.send(f"Use `/{error.command_name}` — that one is a slash command.")
-        return
-    if isinstance(error, SlashNotAllowed):
-        # await ctx.send(f"Use `.{error.command_name}` — that one is a prefix command.")
-        return
-    if isinstance(error, NotRegistered):
-        await ctx.send("You need an account first — run **/register** to get "
-                       "started.")
-        return
-    if isinstance(error, commands.CommandNotFound):
-        return
-    if ctx.command and ctx.command.has_error_handler():
-        return          # the command already dealt with it
-    if isinstance(error, commands.CheckFailure):
-        await ctx.send("You can't use that command here.")
-        return
-
-    original = getattr(error, "original", error)
-    log.error("Unhandled error in .%s invoked by %s (%s): %s",
-              ctx.command, getattr(ctx.author, "id", "?"),
-              type(original).__name__, original, exc_info=original)
-    try:
-        await ctx.send("⚠️ Something went wrong. Please notify the developers.")
-    except Exception:
-        log.warning("Could not deliver the error notice")
+    await handle_command_error(ctx, error)
 
 
 @bot.command(name="sync")
@@ -198,11 +173,6 @@ async def sync_cmd(ctx):
     synced = await ctx.bot.tree.sync(guild=ctx.guild)
     await ctx.send(f"✅ Synced {len(synced)} slash commands to this server.")
 
-
-@sync_cmd.error
-async def sync_error(ctx, error):
-    if isinstance(error, commands.MissingRole):
-        await ctx.send("❌ You need the 'grails-admin' role to sync commands.")
 
 
 @bot.event

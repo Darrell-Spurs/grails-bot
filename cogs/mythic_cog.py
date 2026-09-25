@@ -10,6 +10,7 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import asyncio
 import logging
 
 import discord
@@ -18,20 +19,10 @@ from discord.ext import commands
 
 import db
 from utils import aesthetics
+from utils.autocomplete import catalog_artist_autocomplete
 from utils.command_types import slash_only
-from utils.errors import report_unhandled
 
 log = logging.getLogger("grails.mythic")
-
-
-async def _artist_autocomplete(interaction: discord.Interaction, current: str):
-    cur = (current or "").lower()
-    try:
-        artists = db.get_all_artists()
-    except Exception:
-        log.exception("mythiccheck artist autocomplete failed")
-        return []
-    return [app_commands.Choice(name=a, value=a) for a in artists if cur in a.lower()][:25]
 
 
 async def _song_autocomplete(interaction: discord.Interaction, current: str):
@@ -52,7 +43,7 @@ async def _song_autocomplete(interaction: discord.Interaction, current: str):
         return [app_commands.Choice(name="Pick an artist first", value="none")]
 
     try:
-        rows = db.get_songs_with_ids_by_artist(artist)
+        rows = await asyncio.to_thread(db.get_songs_with_ids_by_artist, artist)
     except Exception:
         log.exception("mythiccheck song autocomplete failed")
         return []
@@ -76,10 +67,11 @@ class MythicCog(commands.Cog):
 
     @commands.hybrid_command(
         name="mythiccheck",
-        description="Check how many mythic copies of a song are claimed")
+        description="Check how many mythic copies of a song are claimed",
+        extras={"missing_arg": "Use `/mythiccheck artist:<name> song:<name>`."})
     @slash_only()
     @app_commands.describe(artist="The artist", song="The song (pick the artist first)")
-    @app_commands.autocomplete(artist=_artist_autocomplete, song=_song_autocomplete)
+    @app_commands.autocomplete(artist=catalog_artist_autocomplete, song=_song_autocomplete)
     async def mythiccheck(self, ctx, artist: str, song: str):
         await ctx.defer()
 
@@ -87,16 +79,12 @@ class MythicCog(commands.Cog):
             await ctx.send("Please pick a song.")
             return
 
-        resolved = await self.bot.loop.run_in_executor(
-            None, self._resolve, artist, song)
+        resolved = await asyncio.to_thread(self._resolve, artist, song)
         if resolved is None:
             await ctx.send(f"Could not find that song under **{artist}**.")
             return
 
-        song_id, song_name, artist_name, rarity, album_name, album_image = resolved
-        info = await self.bot.loop.run_in_executor(None, db.get_mythic_copy_info, song_id)
-        mine = await self.bot.loop.run_in_executor(
-            None, db.get_user_mythic_copy_number, ctx.author.id, song_id)
+        song_id, song_name, artist_name, rarity, album_name, album_image, info = resolved
 
         claimed, cap = info["current_copies"], info["max_copies"]
         filled = "●" * claimed + "○" * max(cap - claimed, 0)
@@ -136,16 +124,8 @@ class MythicCog(commands.Cog):
 
         song_id, name, rarity, album_name, _tc, image, _aid = row
         # get_songs_with_ids_by_artist already carries the album art, so no
-        # second lookup is needed.
-        return song_id, name, artist, rarity, album_name, image
-
-    @mythiccheck.error
-    async def mythiccheck_error(self, ctx, error):
-        if isinstance(error, commands.MissingRequiredArgument):
-            await ctx.send("Use `/mythiccheck artist:<name> song:<name>`.")
-            return
-        await report_unhandled(log, ctx, error, command="mythiccheck")
-
+        # second lookup is needed; the copy count rides along in the same hop.
+        return song_id, name, artist, rarity, album_name, image, db.get_mythic_copy_info(song_id)
 
 async def setup(bot):
     await bot.add_cog(MythicCog(bot))

@@ -8,7 +8,6 @@ import discord
 from discord.ext import commands
 
 from utils.command_types import slash_only
-from utils.errors import report_unhandled
 from utils import aesthetics
 
 log = logging.getLogger("grails.help")
@@ -164,13 +163,6 @@ class HelpCog(commands.Cog):
         )
         _fill_section(embed, BLANK, lines)
         await ctx.send(embed=embed)
-
-    @adminhelp.error
-    async def adminhelp_error(self, ctx, error):
-        if isinstance(error, commands.MissingRole):
-            await ctx.send("❌ You need the **grails-admin** role to use that.")
-            return
-        await report_unhandled(log, ctx, error, command="adminhelp")
 
     @commands.hybrid_command(description="Check the bot's latency")
     @slash_only()

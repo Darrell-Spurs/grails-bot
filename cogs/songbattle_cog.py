@@ -11,8 +11,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from db import (get_song_rarity, get_user_xp, add_user_xp,
-                user_exists, register_user)
+from db import get_song_rarity, add_user_xp_many, register_user
 from utils.helpers import (get_random_song, get_random_album, make_battle_collage,
                            load_square_thumbnail, SOURPATCH_ID)
 from utils.command_types import slash_only
@@ -95,7 +94,8 @@ class SongBattleCog(commands.Cog):
             self._cancel_turn_timer(session)
 
     @commands.hybrid_command(name="songbattle",
-                             description=f"Start a multiplayer song-pull battle ({MIN_PLAYERS}-{MAX_PLAYERS} players)")
+                             description=f"Start a multiplayer song-pull battle ({MIN_PLAYERS}-{MAX_PLAYERS} players)",
+                             extras={"bad_arg": f"❌ **Invalid rounds!** Choose a whole number from {MIN_ROUNDS} to {MAX_ROUNDS}."})
     @slash_only()
     @app_commands.describe(rounds=f"First to how many round-wins takes the match? ({MIN_ROUNDS}-{MAX_ROUNDS}, default {DEFAULT_ROUNDS})")
     async def songbattle(self, ctx, rounds: app_commands.Range[int, MIN_ROUNDS, MAX_ROUNDS] = DEFAULT_ROUNDS):
@@ -104,13 +104,6 @@ class SongBattleCog(commands.Cog):
             await ctx.send("❌ A song battle is already running in this channel!")
             return
         await self._run_battle(ctx, rounds)
-
-    @songbattle.error
-    async def songbattle_error(self, ctx, error):
-        if isinstance(error, commands.BadArgument):
-            await ctx.send(f"❌ **Invalid rounds!** Choose a whole number from {MIN_ROUNDS} to {MAX_ROUNDS}.")
-        else:
-            raise error
 
     @commands.command(name="battle", aliases=["b"], description="Pull your song when it's your turn in a Song Battle")
     async def battle_pull(self, ctx):
@@ -244,7 +237,7 @@ class SongBattleCog(commands.Cog):
         await msg.add_reaction(START_EMOJI)
 
         players = [ctx.author]
-        self._ensure_registered(ctx.author)
+        await self._ensure_registered(ctx.author)
         deadline = time.monotonic() + JOIN_TIMEOUT
 
         def check(reaction, user):
@@ -276,7 +269,7 @@ class SongBattleCog(commands.Cog):
             if user in players:
                 continue
             players.append(user)
-            self._ensure_registered(user)
+            await self._ensure_registered(user)
             embed.set_field_at(0, name=f"Players ({len(players)})",
                                value="\n".join(p.mention for p in players), inline=False)
             await msg.edit(embed=embed)
@@ -299,11 +292,11 @@ class SongBattleCog(commands.Cog):
         await msg.edit(embed=embed)
         return players
 
-    def _ensure_registered(self, member):
-        # Players who join via reaction never go through bot.before_invoke's auto-register,
-        # so register them here to make sure their battle rewards actually land.
-        if not user_exists(member.id):
-            register_user(member.id, xp=0, username=member.name)
+    async def _ensure_registered(self, member):
+        # Players who join via reaction never run a command, so bot.before_invoke's
+        # registration check never sees them; register them here so their battle
+        # rewards actually land. INSERT OR IGNORE, so an existing account is untouched.
+        await asyncio.to_thread(register_user, member.id, 0, member.name)
 
     # ---- battle canvas ----
 
@@ -530,22 +523,18 @@ class SongBattleCog(commands.Cog):
         battle a faster way to farm cards than the drop economy it is supposed
         to sit alongside. XP still lands, so playing is worth something.
         """
+        gains = {slot["member"].id: BASE_PULL_XP * RARITY_MULTIPLIER.get(slot["rarity"], 1)
+                 for slot in slots if slot["song_id"] != SOURPATCH_ID}
+        if not gains:
+            return
+        # Every player's XP in one statement -- this was a read, a write and a
+        # level-up check per player, one after another.
+        changes = await asyncio.to_thread(add_user_xp_many, gains)
+
         xp_cog = self.bot.get_cog('XPCog')
-
-        for slot in slots:
-            member = slot["member"]
-            if slot["song_id"] == SOURPATCH_ID:
-                continue
-
-            level_checkpoint = None
-            if xp_cog:
-                level_checkpoint = xp_cog.get_level_from_xp(get_user_xp(member.id))
-
-            xp_gain = BASE_PULL_XP * RARITY_MULTIPLIER.get(slot["rarity"], 1)
-            add_user_xp(member.id, xp_gain)
-
-            if xp_cog and level_checkpoint is not None:
-                await xp_cog.check_level_up(member.id, level_checkpoint, ctx.channel, member)
+        if xp_cog:
+            await xp_cog.announce_level_ups(changes, ctx.channel,
+                                            {slot["member"].id: slot["member"] for slot in slots})
 
     async def _announce_match_winner(self, session, match_winner_ids):
         """Grant the match-winner XP bonus (split evenly among co-winners on a match tie) and
@@ -556,14 +545,10 @@ class SongBattleCog(commands.Cog):
         xp_cog = self.bot.get_cog('XPCog')
         winner_xp = WINNER_BASE_BONUS_XP * session["rounds_target"]
 
-        for uid in match_winner_ids:
-            member = discord.utils.get(players, id=uid)
-            level_checkpoint = None
-            if xp_cog:
-                level_checkpoint = xp_cog.get_level_from_xp(get_user_xp(uid))
-            add_user_xp(uid, winner_xp)
-            if xp_cog and level_checkpoint is not None:
-                await xp_cog.check_level_up(uid, level_checkpoint, ctx.channel, member)
+        changes = await asyncio.to_thread(add_user_xp_many, {uid: winner_xp for uid in match_winner_ids})
+        if xp_cog:
+            await xp_cog.announce_level_ups(
+                changes, ctx.channel, {uid: discord.utils.get(players, id=uid) for uid in match_winner_ids})
 
         ranked = sorted(players, key=lambda p: scores.get(p.id, 0), reverse=True)
         medals = ["🥇", "🥈", "🥉"]

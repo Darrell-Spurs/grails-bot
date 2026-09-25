@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% block title %}Importing {{ job.artist or job.query }} – Grails-Bot Admin{% endblock %}
+{% block content %}
+
+<a class="backlink" href="{{ url_for('catalog.artists') }}">{{ icon("chevron-left", size=15) }}Catalog</a>
+
+<div class="page-head">
+  <div class="title-block">
+    <h1 data-import-title>{{ job.artist or job.query }}</h1>
+    <p class="title-meta">
+      Spotify import <span class="sep">·</span> started from {{ job.requested_by or "the bot" }}
+    </p>
+  </div>
+</div>
+
+{# Rendered complete from the job as it stands, then kept current by app.js,
+   which polls the progress URL until the job finishes. #}
+<section class="panel import-job" data-import-url="{{ url_for('catalog.import_progress', job_id=job.id) }}"
+         data-state="{{ 'active' if job.active else job.phase }}">
+  <div class="import-status">
+    <span class="import-phase">
+      <span class="import-phase-icon" data-phase-icon="active" {% if not job.active %}hidden{% endif %}>{{ icon("loader-circle", size=15, cls="spin") }}</span>
+      <span class="import-phase-icon" data-phase-icon="done" {% if job.phase != "done" %}hidden{% endif %}>{{ icon("check", size=15) }}</span>
+      <span class="import-phase-icon" data-phase-icon="failed" {% if job.phase != "failed" %}hidden{% endif %}>{{ icon("circle-alert", size=15) }}</span>
+      <span data-import-phase>{{ job.phase_label|capitalize }}</span>
+    </span>
+    <span class="import-count data" data-import-count>
+      {%- if job.phase == "tracks" and job.total %}{{ job.done }} / {{ job.total }} releases{% endif -%}
+    </span>
+  </div>
+  <div class="meter import-meter" role="progressbar" aria-label="Import progress"
+       aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ job.percent }}">
+    <span data-import-bar style="width: {{ job.percent }}%"></span>
+  </div>
+  <p class="import-eta muted note-sm" data-import-eta>
+    {%- if job.eta %}About {{ job.eta }}s left{% endif -%}
+  </p>
+
+  <div class="import-actions" data-import-actions {% if job.phase != "done" %}hidden{% endif %}>
+    <a class="btn" data-import-open href="{{ job.artist_url or '#' }}">Open {{ job.artist or "artist" }}</a>
+    <a class="btn btn-ghost" href="{{ url_for('catalog.artists') }}">Import another</a>
+  </div>
+  <noscript><p class="muted note-sm"><a href="">Refresh</a> to see the latest progress.</p></noscript>
+</section>
+
+<div class="stat-row stat-row-tight">
+  <div class="stat-card">
+    <span class="stat-icon">{{ icon("disc-3", size=18) }}</span>
+    <span class="stat-body"><span class="stat-value" data-stat="albums">{{ job.releases.album }}</span>
+      <span class="stat-label">Albums</span></span>
+  </div>
+  <div class="stat-card">
+    <span class="stat-icon">{{ icon("music-2", size=18) }}</span>
+    <span class="stat-body"><span class="stat-value" data-stat="singles">{{ job.releases.single }}</span>
+      <span class="stat-label">Singles</span></span>
+  </div>
+  <div class="stat-card">
+    <span class="stat-icon">{{ icon("headphones", size=18) }}</span>
+    <span class="stat-body"><span class="stat-value" data-stat="tracks">{{ job.tracks.album + job.tracks.single }}</span>
+      <span class="stat-label">Tracks</span></span>
+  </div>
+  <div class="stat-card">
+    <span class="stat-icon">{{ icon("sparkles", size=18) }}</span>
+    <span class="stat-body"><span class="stat-value" data-stat="new">{{ job.result.new_songs if job.result else "—" }}</span>
+      <span class="stat-label">New songs</span></span>
+  </div>
+</div>
+
+<section class="section" data-import-problems {% if not job.errors %}hidden{% endif %}>
+  <div class="section-head"><h2>Problems</h2></div>
+  <div class="panel import-problems">
+    <ul class="import-errors" data-import-errors>
+      {% for error in job.errors %}<li>{{ error }}</li>{% endfor %}
+    </ul>
+  </div>
+</section>
+
+{% endblock %}

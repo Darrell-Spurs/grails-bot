@@ -12,10 +12,9 @@ from discord import app_commands
 from discord.ext import commands
 
 import db
-from utils.card_art import ART_FILENAME, card_art_file
+from utils.aesthetics import card_emoji
 from utils.collection_ui import (
-    CardView, CollectionView, build_card_embed, card_emoji, rarity_emoji,
-    rarity_colour,
+    CardView, CollectionView, DisableOnTimeoutView, rarity_colour, render_card,
 )
 from utils.command_types import slash_only
 from utils import aesthetics
@@ -32,7 +31,7 @@ def _bar(done, total, width=BAR_WIDTH):
     return "▓" * filled + "░" * (width - filled)
 
 
-class ProfileView(discord.ui.View):
+class ProfileView(DisableOnTimeoutView):
     """Profile actions. Setting a pin or a favorite is owner-only; anyone
     looking at the profile can still jump to the collection."""
 
@@ -62,15 +61,6 @@ class ProfileView(discord.ui.View):
             return False
         return True
 
-    async def on_timeout(self):
-        for child in self.children:
-            child.disabled = True
-        if self.message:
-            try:
-                await self.message.edit(view=self)
-            except discord.HTTPException:
-                pass
-
     @discord.ui.button(label="View pinned card", emoji="\U0001F4CC",
                        style=discord.ButtonStyle.primary, row=0)
     async def open_pinned(self, interaction, button):
@@ -78,15 +68,8 @@ class ProfileView(discord.ui.View):
         view = CardView(self.invoker_id, card, self.owner_name, owner_id=self.owner_id,
                         back_to=self.reopen, owner_icon=self.owner_icon)
         view.message = self.message
-        art = await asyncio.to_thread(card_art_file, card)
-        embed = build_card_embed(
-            card, self.owner_name,
-            copy_number=db.get_card_copy_number(card["collection_id"]),
-            owners=db.count_card_owners(card["song_id"]),
-            pinned=True,
-            art_filename=ART_FILENAME if art else None,
-            owner_icon=self.owner_icon,
-        )
+        embed, art = await render_card(card, self.owner_name,
+                                       owner_icon=self.owner_icon, pinned=True)
         # attachments=[] clears whatever the previous screen uploaded, so the
         # plain-cover case cannot inherit a stale picture.
         await interaction.response.edit_message(
@@ -94,8 +77,8 @@ class ProfileView(discord.ui.View):
 
     @discord.ui.button(label="Collection", style=discord.ButtonStyle.secondary, row=0)
     async def open_collection(self, interaction, button):
-        view = CollectionView(self.invoker_id, self.owner_id, self.owner_name,
-                              back_to=self.reopen, owner_icon=self.owner_icon)
+        view = await CollectionView.open(self.invoker_id, self.owner_id, self.owner_name,
+                                         back_to=self.reopen, owner_icon=self.owner_icon)
         view.message = self.message
         if not view.total:
             await interaction.response.send_message("That collection is empty.", ephemeral=True)
@@ -105,7 +88,7 @@ class ProfileView(discord.ui.View):
     @discord.ui.button(label="Set favorite artist", emoji="❤",
                        style=discord.ButtonStyle.secondary, row=0)
     async def set_favorite(self, interaction, button):
-        artists = db.get_user_collection_artists(self.owner_id)
+        artists = await asyncio.to_thread(db.get_user_collection_artists, self.owner_id)
         if not artists:
             await interaction.response.send_message(
                 "Collect something first — favorites are picked from artists you own.",
@@ -121,7 +104,7 @@ class ProfileView(discord.ui.View):
         )
 
         async def on_pick(inner):
-            db.set_favorite_artist(self.owner_id, select.values[0])
+            await asyncio.to_thread(db.set_favorite_artist, self.owner_id, select.values[0])
             await inner.response.edit_message(
                 content=f"❤ Favorite artist set to **{select.values[0]}**. "
                         f"Run `/profile` again to see it.",
@@ -147,16 +130,25 @@ class ProfileCog(commands.Cog):
             return level, floor, ceiling
         return 0, 0, max(xp, 1)
 
-    def _build_profile(self, owner_id, owner_name, avatar_url, invoker_id):
+    async def _build_profile(self, owner_id, owner_name, avatar_url):
         """Build the profile embed, or None when the user is not registered.
 
         Pulled out of the command so the Back buttons on the collection and
         the pinned card can rebuild the exact same view. Returning it rather
         than sending means one definition serves the first render and every
-        return trip.
+        return trip. The reads happen in a worker thread; the embed is built
+        back on the event loop.
         """
-        data = db.get_user_profile(owner_id)
+        loaded = await asyncio.to_thread(self._load_profile, owner_id)
+        if loaded is None:
+            return None
+        return self._profile_embed(*loaded, owner_name, avatar_url)
 
+    @staticmethod
+    def _load_profile(owner_id):
+        """Everything a profile shows, in one thread hop: (data, pinned card,
+        favorite-artist completion), or None when not registered."""
+        data = db.get_user_profile(owner_id)
         if not data:
             return None
 
@@ -168,6 +160,12 @@ class ProfileCog(commands.Cog):
             if pinned is None:
                 db.clear_pinned_card(owner_id)
 
+        completion = None
+        if data["favorite_artist"]:
+            completion = db.get_artist_completion(owner_id, data["favorite_artist"])
+        return data, pinned, completion
+
+    def _profile_embed(self, data, pinned, completion, owner_name, avatar_url):
         level, floor, ceiling = self._level(data["xp"])
         into = data["xp"] - floor
         span = max(ceiling - floor, 1)
@@ -181,7 +179,7 @@ class ProfileCog(commands.Cog):
             variant = (pinned["variant"] or "default").lower()
             extra = ""
             if variant == "mythic":
-                copy_no = db.get_card_copy_number(pinned["collection_id"])
+                copy_no = pinned.get("copy_number")
                 if copy_no:
                     extra = f" #{copy_no}"   # matches how a collection row shows the copy
             embed.description = (f"\U0001F4CC {card_emoji(pinned['rarity'], variant)} "
@@ -207,7 +205,7 @@ class ProfileCog(commands.Cog):
         # Chosen vs earned: the pair is the interesting part of a profile.
         favorite = data["favorite_artist"]
         if favorite:
-            owned, total = db.get_artist_completion(owner_id, favorite)
+            owned, total = completion
             embed.add_field(
                 name="Favorite artist",
                 value=f"**{favorite}**\n`{_bar(owned, total)}` {owned}/{total} collected",
@@ -229,17 +227,17 @@ class ProfileCog(commands.Cog):
     @app_commands.describe(user="Whose profile to show (defaults to you)")
     async def profile(self, ctx, user: Optional[discord.User] = None):
         owner = user or ctx.author
-        built = self._build_profile(owner.id, owner.display_name,
-                                    owner.display_avatar.url, ctx.author.id)
+        built = await self._build_profile(owner.id, owner.display_name,
+                                          owner.display_avatar.url)
         if built is None:
             who = "You are" if owner.id == ctx.author.id else f"{owner.display_name} is"
             await ctx.send(f"{who} not registered yet — run `.register` to start collecting.")
             return
         embed, pinned = built
-        def reopen():
+        async def reopen():
             """Rebuild the profile view for a Back button."""
-            fresh = self._build_profile(owner.id, owner.display_name,
-                                        owner.display_avatar.url, ctx.author.id)
+            fresh = await self._build_profile(owner.id, owner.display_name,
+                                              owner.display_avatar.url)
             if fresh is None:
                 return None
             new_embed, new_pinned = fresh

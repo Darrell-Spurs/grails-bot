@@ -1,11 +1,11 @@
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
-import requests
 
 from io import BytesIO
 import numpy as np
 import math
 import random
 import os
+from utils.artwork import center_square, fetch_image
 
 # Resolved here rather than imported from helpers: helpers imports this
 # module, so reaching back for it would be a circular import.
@@ -168,12 +168,7 @@ def mythic_card_bytes(url, copy_number=None, size=MYTHIC_CARD_SIZE, seed=None,
     a basic one are tellable apart at a glance.
     """
     theme = _theme_rgb(rarity)
-    response = requests.get(url, timeout=15)
-    cover = Image.open(BytesIO(response.content)).convert("RGB")
-    side = min(cover.size)
-    left = (cover.width - side) // 2
-    top = (cover.height - side) // 2
-    cover = cover.crop((left, top, left + side, top + side))
+    cover = center_square(fetch_image(url))
 
     canvas = _blurred_backdrop(cover, size).convert("RGBA")
 
@@ -337,12 +332,7 @@ def mythic_card_gif_bytes(url, copy_number=None, size=MYTHIC_CARD_SIZE, seed=Non
     sparkle layout so the card animates identically every time it is viewed.
     """
     theme = _theme_rgb(rarity)
-    response = requests.get(url, timeout=15)
-    cover = Image.open(BytesIO(response.content)).convert("RGB")
-    side = min(cover.size)
-    left = (cover.width - side) // 2
-    top = (cover.height - side) // 2
-    cover = cover.crop((left, top, left + side, top + side))
+    cover = center_square(fetch_image(url))
 
     backdrop = _dither_once(_blurred_backdrop(cover, size)).convert("RGBA")
 

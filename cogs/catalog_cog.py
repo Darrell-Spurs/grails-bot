@@ -21,27 +21,15 @@ from discord.ext import commands
 
 import db
 from utils import aesthetics
-from utils.collection_ui import (RARITY_ORDER, UNASSIGNED, rarity_emoji, rarity_rank,
-                                 safe_option_emoji)
+from utils.autocomplete import catalog_artist_autocomplete
+from utils.aesthetics import (RARITY_ORDER, UNASSIGNED, rarity_emoji, rarity_rank,
+                              safe_option_emoji)
+from utils.collection_ui import DisableOnTimeoutView
 from utils.command_types import slash_only
-from utils.helpers import cached_artists
-from utils.errors import report_unhandled
 
 log = logging.getLogger("grails.catalog")
 
 PER_PAGE = 15
-
-
-async def _catalog_artist_autocomplete(interaction: discord.Interaction, current: str):
-    """Every artist in the pool, unlike the collection autocompletes which are
-    scoped to what one player owns."""
-    cur = (current or "").lower()
-    try:
-        artists = db.get_all_artists()
-    except Exception:
-        log.exception("catalog artist autocomplete failed")
-        return []
-    return [app_commands.Choice(name=a, value=a) for a in artists if cur in a.lower()][:25]
 
 
 # Album lists are read once per keystroke while someone types into the album
@@ -75,13 +63,17 @@ async def _album_autocomplete(interaction: discord.Interaction, current: str):
     if not artist:
         return [app_commands.Choice(name="Pick an artist first", value="")]
 
-    resolved = _resolve_artist(artist)
-    if not resolved:
-        return []
+    def lookup():
+        resolved = _resolve_artist(artist)
+        return resolved, (_cached_album_counts(resolved) if resolved else None)
+
     try:
-        rows = _cached_album_counts(resolved)
+        # Both are cache hits nearly every keystroke, but a miss is a query.
+        resolved, rows = await asyncio.to_thread(lookup)
     except Exception:
-        log.exception("album autocomplete failed for %s", resolved)
+        log.exception("album autocomplete failed for %s", artist)
+        return []
+    if not resolved:
         return []
 
     cur = (current or "").lower()
@@ -133,9 +125,9 @@ def _resolve_artist(name):
     if not name:
         return None
     lowered = name.strip().lower()
-    # Cached, not a fresh query: autocomplete resolves the artist on every
+    # Served from the catalogue cache: autocomplete resolves the artist on every
     # keystroke, and this used to read the whole artist table twice per call.
-    artists = cached_artists()
+    artists = db.get_all_artists()
     for a in artists:
         if a.lower() == lowered:
             return a
@@ -145,7 +137,7 @@ def _resolve_artist(name):
     return None
 
 
-class Paginator(discord.ui.View):
+class Paginator(DisableOnTimeoutView):
     """Prev/next over a list of preformatted lines.
 
     Anyone may drive it. Every subclass browses the public catalogue, where the
@@ -186,15 +178,6 @@ class Paginator(discord.ui.View):
                 elif child.label == "Next":
                     child.disabled = self.page >= self.pages - 1
         return embed
-
-    async def on_timeout(self):
-        for child in self.children:
-            child.disabled = True
-        if self.message:
-            try:
-                await self.message.edit(view=self)
-            except discord.HTTPException:
-                pass
 
     @discord.ui.button(label="Prev", style=discord.ButtonStyle.secondary)
     async def prev(self, interaction, button):
@@ -507,10 +490,11 @@ class CatalogCog(commands.Cog):
         view.message = await ctx.send(embed=view.render(), view=view)
 
     # ---- /albums ----------------------------------------------------------
-    @commands.hybrid_command(name="albums", description="List an artist's available releases")
+    @commands.hybrid_command(name="albums", description="List an artist's available releases",
+                             extras={"missing_arg": "Name an artist — try `/albums artist:<name>`."})
     @slash_only()
     @app_commands.describe(artist="Which artist")
-    @app_commands.autocomplete(artist=_catalog_artist_autocomplete)
+    @app_commands.autocomplete(artist=catalog_artist_autocomplete)
     async def albums(self, ctx, *, artist: str):
         await ctx.defer()
         resolved = await self.bot.loop.run_in_executor(None, _resolve_artist, artist)
@@ -538,11 +522,12 @@ class CatalogCog(commands.Cog):
         view.message = await ctx.send(embed=view.render(), view=view)
 
     # ---- /songs -----------------------------------------------------------
-    @commands.hybrid_command(name="songs", description="List an artist's songs")
+    @commands.hybrid_command(name="songs", description="List an artist's songs",
+                             extras={"missing_arg": "Name an artist — try `/songs artist:<name>`."})
     @slash_only()
     @app_commands.describe(artist="Which artist", rarity="Only show this rarity",
                            album="Only show songs from this release")
-    @app_commands.autocomplete(artist=_catalog_artist_autocomplete,
+    @app_commands.autocomplete(artist=catalog_artist_autocomplete,
                                rarity=_rarity_autocomplete,
                                album=_album_autocomplete)
     async def songs(self, ctx, artist: str, rarity: Optional[str] = None,
@@ -603,26 +588,6 @@ class CatalogCog(commands.Cog):
                          rarity=wanted, album=chosen)
         # Always attach: the album filter is live even on a single page.
         view.message = await ctx.send(embed=view.render(), view=view)
-
-    # ---- errors -----------------------------------------------------------
-    @artists.error
-    async def artists_error(self, ctx, error):
-        await report_unhandled(log, ctx, error, command="artists")
-
-    @albums.error
-    async def albums_error(self, ctx, error):
-        if isinstance(error, commands.MissingRequiredArgument):
-            await ctx.send("Name an artist — try `/albums artist:<name>`.")
-            return
-        await report_unhandled(log, ctx, error, command="albums")
-
-    @songs.error
-    async def songs_error(self, ctx, error):
-        if isinstance(error, commands.MissingRequiredArgument):
-            await ctx.send("Name an artist — try `/songs artist:<name>`.")
-            return
-        await report_unhandled(log, ctx, error, command="songs")
-
 
 async def setup(bot):
     await bot.add_cog(CatalogCog(bot))

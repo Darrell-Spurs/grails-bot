@@ -12,12 +12,10 @@ import asyncio
 import logging
 
 import discord
-from discord import app_commands
 from discord.ext import commands
 
 import db
 from utils import aesthetics, economy
-from utils.errors import report_unhandled
 
 log = logging.getLogger("grails.pulls")
 
@@ -93,11 +91,6 @@ class PullsCog(commands.Cog):
         Usage: /cooldown — or .cooldown / .cd
         """
         await self._show(ctx, user)
-
-    @cooldown.error
-    async def cooldown_error(self, ctx, error):
-        await report_unhandled(log, ctx, error, command="cooldown")
-
 
 async def setup(bot):
     await bot.add_cog(PullsCog(bot))

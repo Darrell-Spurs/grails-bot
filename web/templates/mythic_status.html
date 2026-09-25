@@ -50,11 +50,11 @@
         <tr><th class="num col-rank">Copy</th><th>User</th><th>Collected</th></tr>
       </thead>
       <tbody>
-        {% for user_id, collected_at in owners %}
+        {% for user_id, collected_at, copy_number in owners %}
         <tr>
-          {# Owners come back ordered by collected_at ascending, which is exactly
-             the order copy numbers are handed out in. #}
-          <td class="num data"><strong>#{{ loop.index }}</strong></td>
+          {# The number stored on the copy, not its place in this list: a copy
+             an admin removed leaves a gap instead of renumbering the rest. #}
+          <td class="num data"><strong>#{{ copy_number }}</strong></td>
           <td><a class="data" href="{{ url_for('users.detail', user_id=user_id) }}">{{ user_id }}</a></td>
           <td class="data nowrap muted">{{ collected_at|moment }}</td>
         </tr>

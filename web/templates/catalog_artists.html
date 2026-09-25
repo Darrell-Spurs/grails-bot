@@ -27,11 +27,24 @@
   <label class="visually-hidden" for="artist_name">Artist to import from Spotify</label>
   <input type="text" id="artist_name" name="artist_name" placeholder="Artist name" required>
   <button type="submit" class="btn">Import artist</button>
-  <p class="import-hint">Imports every album and single. Large discographies take a minute.</p>
+  <p class="import-hint">Imports every album and single. Progress opens on the next page.</p>
   <p class="import-pending" data-busy-note hidden>
-    {{ icon("loader-circle", size=14, cls="spin") }}Importing from Spotify — keep this tab open.
+    {{ icon("loader-circle", size=14, cls="spin") }}Starting the import…
   </p>
 </form>
+
+{% if imports %}
+<ul class="import-running" aria-label="Imports in progress">
+  {% for job in imports %}
+  <li>
+    <a href="{{ url_for('catalog.import_status', job_id=job.id) }}">
+      {{ icon("loader-circle", size=14, cls="spin") }}Importing {{ job.artist or job.query }}
+      <span class="muted">· {{ job.phase_label }}</span>
+    </a>
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
 
 <section class="section">
   <div class="section-head">

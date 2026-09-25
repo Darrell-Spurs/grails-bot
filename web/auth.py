@@ -1,17 +1,7 @@
 import os
-from functools import wraps
 from flask import Blueprint, request, session, redirect, url_for, render_template
 
 auth_bp = Blueprint("auth", __name__)
-
-
-def login_required(view):
-    @wraps(view)
-    def wrapped(*args, **kwargs):
-        if not session.get("authed"):
-            return redirect(url_for("auth.login", next=request.path))
-        return view(*args, **kwargs)
-    return wrapped
 
 
 @auth_bp.route("/login", methods=["GET", "POST"])

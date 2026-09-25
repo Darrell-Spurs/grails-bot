@@ -12,10 +12,9 @@ from discord import app_commands
 from discord.ext import commands
 
 import db
-from db import (get_user_song_by_details, transfer_collection_item, user_exists,
-                get_user_mythic_copy_number, get_user_tradeable_items, get_collection_item_by_id)
+from db import (transfer_collection_item, swap_collection_items, user_exists,
+                get_user_tradeable_items, get_collection_item_by_id)
 from utils.command_types import slash_only
-from utils.errors import report_unhandled
 from utils.aesthetics import ACCENT_COLOR_INT, VARIANTS, VARIANT_LABEL, card_emoji, safe_option_emoji
 
 log = logging.getLogger("grails.trade")
@@ -31,9 +30,11 @@ TRADE_TIMEOUT = 120
 MIN_AUTOCOMPLETE_CHARS = 2
 
 # Index of the collection variant in a resolved trade row. The rows come from
-# get_user_song_by_details / get_user_tradeable_items, which agree on:
-# (collection_id, song_id, album_id, song_name, artist, variant, album_name, rarity)
+# get_user_tradeable_items / get_collection_item_by_id, which agree on:
+# (collection_id, song_id, album_id, song_name, artist, variant, album_name,
+#  rarity, copy_number)
 _VARIANT = 5
+_COPY_NUMBER = 8
 
 
 def _variant_of(row):
@@ -92,10 +93,10 @@ async def _own_artist_autocomplete(interaction: discord.Interaction, current: st
     rarity = rarity if rarity in RARITIES else None
     try:
         if rarity:
-            items = get_user_tradeable_items(str(interaction.user.id), rarity)
+            items = await asyncio.to_thread(get_user_tradeable_items, str(interaction.user.id), rarity)
             artists = sorted({row[4] for row in items})
         else:
-            artists = db.get_user_collection_artists(interaction.user.id)
+            artists = await asyncio.to_thread(db.get_user_collection_artists, interaction.user.id)
     except Exception:
         # An autocomplete that raises shows the user an empty box and logs
         # nothing, which is indistinguishable from owning no cards.
@@ -134,8 +135,8 @@ async def _own_item_autocomplete(interaction: discord.Interaction, current: str)
         return []
 
     try:
-        cards = db.search_user_cards(interaction.user.id, query=query, limit=25,
-                                     variant=rarity, artist=artist)
+        cards = await asyncio.to_thread(db.search_user_cards, interaction.user.id, query=query,
+                                        limit=25, variant=rarity, artist=artist)
     except Exception:
         log.exception("trade item autocomplete failed")
         return []
@@ -477,12 +478,15 @@ class TradeCog(commands.Cog):
             return
         await self._close_trade(key, f"expired after {TRADE_TIMEOUT // 60} minutes")
 
-    def format_song_display(self, user_id, song_data):
+    def format_song_display(self, song_data):
         """Format song display with copy number for mythics.
 
         The variant comes off the row, not from the caller: with `rarity`
         optional there may be no argument to pass, and the two sides of a trade
-        can now hold different variants entirely.
+        can now hold different variants entirely. So does the copy number, which
+        is stored on the card -- this used to look up the *holder's* earliest
+        copy of the song instead, a database call per line that could name a
+        different card than the one being traded.
         """
         song_name = song_data[3]
         artist_name = song_data[4]
@@ -492,7 +496,7 @@ class TradeCog(commands.Cog):
         glyph = card_emoji(song_rarity, variant)
 
         if variant == "mythic":
-            copy_number = get_user_mythic_copy_number(user_id, song_data[1])  # song_data[1] is song_id
+            copy_number = song_data[_COPY_NUMBER] if len(song_data) > _COPY_NUMBER else None
             if copy_number:
                 return (f"{glyph} ** #{copy_number} {song_name}** by **{artist_name}** from *{album_name}*")
         return f"{glyph} **{song_name}** by **{artist_name}**"
@@ -539,7 +543,10 @@ class TradeCog(commands.Cog):
                 return retry_found, retry_matches, None
         return song_found, matches, artist
 
-    @commands.hybrid_command(name="trade", description="Offer a song to trade (default to the most recent song)")
+    @commands.hybrid_command(name="trade", description="Offer a song to trade (default to the most recent song)",
+                             extras={"missing_arg": "❌ **Missing arguments!**\n"
+                                                    "**Usage:** `.trade @user [rarity] [song]` — or use `/trade` for autocomplete.",
+                                     "bad_arg": "❌ **Invalid user!** Make sure to properly mention (@) a valid user."})
     @slash_only()
     @app_commands.describe(user="User to trade with", rarity="Optional: only offer cards of this variant",
                            artist="Optional: only cards by this artist",
@@ -597,7 +604,7 @@ class TradeCog(commands.Cog):
         )
         embed.add_field(
             name=f"{initiator.display_name} offers:",
-            value=self.format_song_display(str(initiator.id), song_found),
+            value=self.format_song_display(song_found),
             inline=False
         )
         embed.add_field(
@@ -629,7 +636,10 @@ class TradeCog(commands.Cog):
             self._expire_trade(trade_key, token))
         return None
 
-    @commands.hybrid_command(name="gift", description="Gift a song (default to the most recent song)")
+    @commands.hybrid_command(name="gift", description="Gift a song (default to the most recent song)",
+                             extras={"missing_arg": "Use `/gift user:<who>` — the item defaults "
+                                                    "to your newest card matching the filters.",
+                                     "bad_arg": "❌ **Invalid user!** Mention someone with @."})
     @slash_only()
     @app_commands.describe(user="Who to gift it to", rarity="Optional: only gift cards of this variant",
                            artist="Optional: only cards by this artist",
@@ -667,9 +677,7 @@ class TradeCog(commands.Cog):
             await ctx.send(self._ambiguous_message(rarity, item, matches, artist))
             return
 
-        # Read the display line before the card moves: afterwards the copy
-        # number belongs to the recipient, not the giver.
-        line = self.format_song_display(str(ctx.author.id), song_found)
+        line = self.format_song_display(song_found)
 
         embed = discord.Embed(
             title="Gift pending ⏳",
@@ -681,17 +689,6 @@ class TradeCog(commands.Cog):
         # when it is proposed and could still be cancelled.
         view = GiftConfirmView(ctx.author, user, song_found, line)
         view.message = await ctx.send(embed=embed, view=view)
-
-    @gift.error
-    async def gift_error(self, ctx, error):
-        if isinstance(error, commands.MissingRequiredArgument):
-            await ctx.send("Use `/gift user:<who>` — the item defaults "
-                           "to your newest card matching the filters.")
-            return
-        if isinstance(error, (commands.MemberNotFound, commands.BadArgument)):
-            await ctx.send("❌ **Invalid user!** Mention someone with @.")
-            return
-        await report_unhandled(log, ctx, error, command="gift")
 
     async def _run_offer(self, responder, trade_key, trade_data, song_found):
         """Put `song_found` up against the open trade and run the confirmation.
@@ -709,12 +706,12 @@ class TradeCog(commands.Cog):
         )
         embed.add_field(
             name=f"{trade_data['initiator'].display_name} offers:",
-            value=self.format_song_display(str(trade_data['initiator'].id), initiator_song),
+            value=self.format_song_display(initiator_song),
             inline=False
         )
         embed.add_field(
             name=f"{responder.display_name} offers:",
-            value=self.format_song_display(str(responder.id), song_found),
+            value=self.format_song_display(song_found),
             inline=False
         )
         embed.set_footer(text="Both users react with ✅ to confirm the trade, or ❌ to cancel")
@@ -775,17 +772,16 @@ class TradeCog(commands.Cog):
                 self._drop_trade(trade_key)
                 return
 
-            # Reassign both rows rather than deleting and re-inserting them.
-            # The old delete/insert pair went through remove_from_collection,
-            # whose `WHERE rowid` is SQLite-only and raised UndefinedColumn on
-            # Postgres -- and even where it ran, its unordered `LIMIT 1` picked
-            # an arbitrary duplicate and the re-insert renumbered mythic copies,
-            # so #1 could come back as #3. Moving the row keeps its id, its
-            # collected_at and therefore its copy number.
+            # Both rows are reassigned together or not at all
+            # (db.swap_collection_items). Moved one at a time, a second card
+            # that had been gifted away meanwhile still let the first one go
+            # -- a one-sided trade. Reassigning rather than re-inserting keeps
+            # each card's id, pull date and mythic copy number.
             initiator_id = str(trade_data['initiator'].id)
             responder_id = str(responder.id)
-            moved = (transfer_collection_item(initiator_song[0], initiator_id, responder_id)
-                     and transfer_collection_item(song_found[0], responder_id, initiator_id))
+            moved = await asyncio.to_thread(swap_collection_items,
+                                            initiator_song[0], initiator_id,
+                                            song_found[0], responder_id)
             if not moved:
                 # Either card can have been gifted or traded away while the
                 # confirmation sat open.
@@ -800,12 +796,12 @@ class TradeCog(commands.Cog):
             embed.clear_fields()
             embed.add_field(
                 name=f"{trade_data['initiator'].display_name} received:",
-                value=self.format_song_display(str(trade_data['initiator'].id), song_found),
+                value=self.format_song_display(song_found),
                 inline=False
             )
             embed.add_field(
                 name=f"{responder.display_name} received:",
-                value=self.format_song_display(str(responder.id), initiator_song),
+                value=self.format_song_display(initiator_song),
                 inline=False
             )
             embed.set_footer(text="Trade successful! Check your collections.")
@@ -837,17 +833,6 @@ class TradeCog(commands.Cog):
             await ctx.send("⚠️ Your trade has been cancelled.")
         else:
             await ctx.send("❌ You don't have any active trades to cancel.")
-
-    @trade.error
-    async def trade_error(self, ctx, error):
-        """Handle errors for the trade command"""
-        if isinstance(error, commands.MissingRequiredArgument):
-            await ctx.send("❌ **Missing arguments!**\n"
-                           "**Usage:** `.trade @user [rarity] [song]` — or use `/trade` for autocomplete.")
-        elif isinstance(error, commands.MemberNotFound) or isinstance(error, commands.BadArgument):
-            await ctx.send("❌ **Invalid user!** Make sure to properly mention (@) a valid user.")
-        else:
-            raise error
 
 async def setup(bot):
     await bot.add_cog(TradeCog(bot))

@@ -2,15 +2,13 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import random, math, asyncio
-from db import (get_user_xp, add_user_xp, user_exists, get_all_artists,
-                can_claim_daily, update_daily_claim, add_song_to_collection,
-                add_vinyl_count, get_vinyl_count, use_vinyl_pull,
-                get_sig_vinyl_count, use_sig_vinyl_pull, add_sig_vinyl_count,
+from db import (get_user_xp, user_exists, get_all_artists, claim_daily,
+                add_song_to_collection, add_user_xp_many, add_vinyls_many,
+                get_vinyl_counts, use_vinyl_pull, use_sig_vinyl_pull,
                 get_top_users_by_xp, get_user_xp_rank)
 from utils.helpers import (pick_unique_song,
                            SOURPATCH_ID, SOURPATCH_IMAGE)
 from utils import aesthetics, economy, odds
-from utils.errors import report_unhandled
 from utils.vinyl import vinyl_gif_sig_art_from_url, vinyl_static_bytes
 import logging
 from utils.command_types import slash_only
@@ -58,12 +56,6 @@ class XPCog(commands.Cog):
             additional_levels = level - 15
             return level_15_xp + (additional_levels * 8000)
 
-    def get_xp_to_next_level(self, current_xp):
-        """Calculate XP needed to reach next level"""
-        current_level = self.get_level_from_xp(current_xp)
-        xp_for_next_level = self.get_xp_for_level(current_level + 1)
-        return xp_for_next_level - current_xp
-
     def xp_progress_text(self, current_xp):
         """The level, the bar and the gap to the next level, as embed text.
 
@@ -87,65 +79,67 @@ class XPCog(commands.Cog):
         return (f"**Level {level}**\n\n`{bar}` {into:,}/{span:,} XP\n\n"
                 f"`{ceiling - current_xp:,}` XP needed to the next level")
 
-    def get_level_rewards(self, level):
-        """Get reward description for a specific level"""
-        rewards = {
-            1: "🎵 1x Vinyl Pull + Welcome Badge",
-            2: "🎵 2x Vinyl Pulls + Bronze Collector Badge",
-            3: "🎵 3x Vinyl Pulls + Music Explorer Badge",
-            4: "🎵 4x Vinyl Pulls + Rhythm Master Badge",
-            5: "🎵 5x Vinyl Pulls + Silver Collector Badge + Special Title",
-            10: "🎵 10x Vinyl Pulls + Gold Collector Badge + Exclusive Avatar",
-            15: "🎵 15x Vinyl Pulls + Platinum Collector Badge + Custom Role",
-            20: "🎵 20x Vinyl Pulls + Diamond Collector Badge + VIP Access",
-            25: "🎵 25x Vinyl Pulls + Legendary Collector Badge + All Perks"
-        }
+    async def add_xp(self, amounts):
+        """Grant XP: {user_id: xp} -> {user_id: (xp_before, xp_after)}.
 
-    async def check_level_up(self, user_id, level_checkpoint, channel, user=None):
-        xp_ = get_user_xp(user_id)
-        current_level = self.get_level_from_xp(xp_)      
-        # Check if they leveled up
-        if current_level > level_checkpoint:
+        One atomic statement for any number of players (db.add_user_xp_many).
+        Hand the result to announce_level_ups -- a separate step so each caller
+        can post its own message before or after the level-up one.
+        """
+        return await asyncio.to_thread(add_user_xp_many, amounts)
+
+    async def announce_level_ups(self, changes, channel, users=None):
+        """Pay and announce every level crossed in `changes` (from add_xp).
+
+        Judged on each grant's own before/after rather than on a fresh read of
+        the XP afterwards: with the database work off the event loop, a second
+        grant for the same player can land in between, and the old re-read
+        would then have paid that level twice. The rewards for everyone go out
+        in one statement, which also returns the counts the message shows.
+        """
+        users = users or {}
+        crossed = {}
+        for user_id, (before, after) in changes.items():
+            old_level, new_level = self.get_level_from_xp(before), self.get_level_from_xp(after)
+            if new_level > old_level:
+                crossed[user_id] = (new_level - old_level, new_level)
+        if not crossed:
+            return
+
+        # A signature vinyl whenever the level reached is a multiple of five.
+        totals = await asyncio.to_thread(add_vinyls_many, {
+            user_id: (gained, 0 if level % 5 else 1) for user_id, (gained, level) in crossed.items()})
+
+        for user_id, (levels_gained, current_level) in crossed.items():
             log.info("level up detected for %s", user_id)
-            # Calculate how many levels they gained
-            levels_gained = current_level - level_checkpoint
-
-            # Add vinyl pulls for each level gained
-            add_vinyl_count(user_id, levels_gained)
-            if not current_level % 5:
-                add_sig_vinyl_count(user_id, 1)
-
-            # Send level-up message
+            user = users.get(user_id)
             if not user:
                 try:
                     user = await self.bot.fetch_user(user_id)
                 except discord.HTTPException:
                     user = self.bot.get_user(user_id)
+            if not user:
+                log.warning("Could not find user %s for level-up message", user_id)
+                continue
 
             level_up_note = f"{levels_gained} {named_emoji('vinyl')} {'s' if levels_gained > 1 else ''}"
             if not current_level % 5:
                 level_up_note = f" 1 {named_emoji('sig_vinyl')} & " + level_up_note
             level_up_note = "You received " + level_up_note
-            remaining_note = f"Owned: {get_vinyl_count(user_id)} {named_emoji('vinyl')}, {get_sig_vinyl_count(user_id)} {named_emoji('sig_vinyl')}"
-            
-            if user:
-                embed = discord.Embed(
-                    title="🎉 LEVEL UP!",
-                    description=f"**{user.display_name}** reached **Level {current_level}**!\n {level_up_note}\n {remaining_note}",
-                    color=discord.Color.gold()
-                )
+            vinyls, sigs = totals.get(user_id, (0, 0))
+            remaining_note = f"Owned: {vinyls} {named_emoji('vinyl')}, {sigs} {named_emoji('sig_vinyl')}"
 
-                total_vinyl_count = get_vinyl_count(user_id)
-                total_sig_vinyl_count = get_sig_vinyl_count(user_id)
+            embed = discord.Embed(
+                title="🎉 LEVEL UP!",
+                description=f"**{user.display_name}** reached **Level {current_level}**!\n {level_up_note}\n {remaining_note}",
+                color=discord.Color.gold()
+            )
+            embed.set_thumbnail(url=user.display_avatar.url)
+            embed.set_footer(text=f"Use .v and .sv to open your vinyls")
+            await channel.send(embed=embed)
 
-                embed.set_thumbnail(url=user.display_avatar.url)
-                embed.set_footer(text=f"Use .v and .sv to open your vinyls")
-
-                await channel.send(embed=embed)
-            else:
-                log.warning("Could not find user %s for level-up message", user_id)
-  
-    @commands.hybrid_command(description="Check your XP or another user's XP")
+    @commands.hybrid_command(description="Check your XP or another user's XP",
+                             extras={"bad_arg": "❌ **Invalid user!** Please mention a valid user."})
     @slash_only()
     async def xp(self, ctx, user: discord.User = None):
         """Check a user's XP
@@ -155,7 +149,9 @@ class XPCog(commands.Cog):
         target_user = user or ctx.author
 
         # Check if user is registered
-        if not user_exists(target_user.id):
+        registered, current_xp = await asyncio.to_thread(
+            lambda: (user_exists(target_user.id), get_user_xp(target_user.id)))
+        if not registered:
             if target_user == ctx.author:
                 await ctx.send(
                     "❌ **You are not registered!** Use `.register` to get started."
@@ -164,9 +160,6 @@ class XPCog(commands.Cog):
                 await ctx.send(
                     f"❌ **{target_user.display_name}** is not registered!")
             return
-
-        current_xp = get_user_xp(target_user.id)
-        current_level = self.get_level_from_xp(current_xp)
 
         embed = discord.Embed(
             color=discord.Color.gold(),
@@ -178,7 +171,8 @@ class XPCog(commands.Cog):
 
         await ctx.send(embed=embed)
 
-    @commands.hybrid_command(name="leaderboard", description="The XP leaderboard")
+    @commands.hybrid_command(name="leaderboard", description="The XP leaderboard",
+                             extras={"bad_arg": "`count` has to be a number between 1 and 25."})
     @slash_only()
     @app_commands.describe(count="How many players to show (1-25, default 10)")
     async def leaderboard(self, ctx, count: int = 10):
@@ -225,13 +219,6 @@ class XPCog(commands.Cog):
                 )
         await ctx.send(embed=embed)
 
-    @leaderboard.error
-    async def leaderboard_error(self, ctx, error):
-        if isinstance(error, commands.BadArgument):
-            await ctx.send("`count` has to be a number between 1 and 25.")
-            return
-        await report_unhandled(log, ctx, error, command="leaderboard")
-
     @commands.hybrid_command(name="xphelp", description="How XP, levels and vinyl rewards work")
     @slash_only()
     async def xphelp(self, ctx):
@@ -274,17 +261,19 @@ class XPCog(commands.Cog):
     @commands.hybrid_command(description="Claim your daily XP reward")
     async def daily(self, ctx):
         """Claim your daily XP reward"""
-        # Check if user is registered
-        if not user_exists(ctx.author.id):
+        daily_xp = random.randint(10, 100) * 10
+
+        # Checked and paid in one statement (db.claim_daily). As two steps, two
+        # quick `.daily`s could both pass the check and both be paid.
+        outcome, detail = await asyncio.to_thread(claim_daily, ctx.author.id, daily_xp)
+
+        if outcome == "unregistered":
             await ctx.send(
                 "❌ **You are not registered!** Use `.register` to get started."
             )
             return
 
-        # Check if user can claim daily reward
-        can_claim, remaining_seconds = can_claim_daily(ctx.author.id)
-
-        if not can_claim:
+        if outcome == "wait":
             # Second person, and no name: for a slash command Discord already
             # prints "<user> used /daily" above the reply, and a prefix reply
             # is attached to their message -- so the sentence does not have to
@@ -294,22 +283,17 @@ class XPCog(commands.Cog):
             # and an embed would give it the weight of one.
             await ctx.send(
                 f"You've already claimed today's reward "
-                f"— come back {economy.discord_countdown(remaining_seconds)}.")
+                f"— come back {economy.discord_countdown(detail)}.")
             return
 
-        # Add daily XP reward and update claim timestamp
-        daily_xp = random.randint(10, 100) * 10
-
-        level_checkpoint = self.get_level_from_xp(get_user_xp(ctx.author.id))
-        add_user_xp(ctx.author.id, daily_xp)
-        update_daily_claim(ctx.author.id)
+        xp_before, xp_after = detail
 
         # The claim itself is a reward, and the one thing a player does every
         # day, so it gets an embed: the XP as the headline, their standing
         # underneath, and a live countdown to the next one.
         embed = discord.Embed(
             title=f"You got +{daily_xp:,} XP from daily rewards!",
-            description=self.xp_progress_text(get_user_xp(ctx.author.id)),
+            description=self.xp_progress_text(xp_after),
             colour=discord.Color.gold(),
         )
         embed.set_author(name=ctx.author.display_name,
@@ -317,7 +301,8 @@ class XPCog(commands.Cog):
         await ctx.send(embed=embed)
 
         # Check for level-up after claiming daily reward
-        await self.check_level_up(ctx.author.id, level_checkpoint, ctx.channel, ctx.author)
+        await self.announce_level_ups({ctx.author.id: (xp_before, xp_after)},
+                                      ctx.channel, {ctx.author.id: ctx.author})
 
     @commands.hybrid_command(aliases=['vc'], description="Check available vinyl pulls")
     async def vinylcheck(self, ctx, user: discord.User = None):
@@ -326,9 +311,10 @@ class XPCog(commands.Cog):
         Example: .vinylcheck or .vinylcheck @username
         """
         target_user = user or ctx.author
-        
-        # Check if user is registered
-        if not user_exists(target_user.id):
+
+        # Registration and both counts in one read
+        counts = await asyncio.to_thread(get_vinyl_counts, target_user.id)
+        if counts is None:
             if target_user == ctx.author:
                 await ctx.send(
                     "❌ **You are not registered!** Use `.register` to get started."
@@ -337,9 +323,8 @@ class XPCog(commands.Cog):
                 await ctx.send(
                     f"❌ **{target_user.display_name}** is not registered!")
             return
-        
-        vinyl_count = get_vinyl_count(target_user.id)
-        sig_count = get_sig_vinyl_count(target_user.id)
+
+        vinyl_count, sig_count = counts
 
         # Both counts in the description, not as fields: the phone app stacks
         # every field on its own row, so two lines of text look the same
@@ -356,29 +341,41 @@ class XPCog(commands.Cog):
         embed.set_footer(text="Open them with .sv / .v")
         await ctx.send(embed=embed)
 
+    @staticmethod
+    def _spend_vinyl(user_id, sig):
+        """Check and spend one pull, off the event loop. Returns what happened.
+
+        The spend itself is a guarded UPDATE, so two pulls racing for the last
+        vinyl cannot both get it -- the loser reads "error" and is told to retry.
+        """
+        counts = get_vinyl_counts(user_id)
+        if counts is None:
+            return "unregistered"
+        if (counts[1] if sig else counts[0]) <= 0:
+            return "empty"
+        if not (use_sig_vinyl_pull if sig else use_vinyl_pull)(user_id):
+            return "error"
+        if not get_all_artists():
+            return "no_artists"
+        return "ok"
+
     async def _do_vinyl_pull(self, ctx, guaranteed_sig):
         """Shared implementation for .vinyl and .sigvinyl (they were ~90% identical)."""
-        if not user_exists(ctx.author.id):
+        spent = await asyncio.to_thread(self._spend_vinyl, ctx.author.id, guaranteed_sig)
+        if spent == "unregistered":
             await ctx.send("❌ **You are not registered!** Use `.register` to get started.")
             return
-
-        # Pull-count check + consume
-        if guaranteed_sig:
-            if get_sig_vinyl_count(ctx.author.id) <= 0:
-                await ctx.send("❌ **No signature vinyl pulls available.** Level up to collect more!")
-                return
-            if not use_sig_vinyl_pull(ctx.author.id):
-                await ctx.send("❌ **Error using signature vinyl pull!** Please try again.")
-                return
-        else:
-            if get_vinyl_count(ctx.author.id) <= 0:
-                await ctx.send("❌ **No vinyl pulls available.** Level up to collect more!")
-                return
-            if not use_vinyl_pull(ctx.author.id):
-                await ctx.send("❌ **Error using vinyl pull!** Please try again.")
-                return
-
-        if not get_all_artists():
+        if spent == "empty":
+            await ctx.send("❌ **No signature vinyl pulls available.** Level up to collect more!"
+                           if guaranteed_sig else
+                           "❌ **No vinyl pulls available.** Level up to collect more!")
+            return
+        if spent == "error":
+            await ctx.send("❌ **Error using signature vinyl pull!** Please try again."
+                           if guaranteed_sig else
+                           "❌ **Error using vinyl pull!** Please try again.")
+            return
+        if spent == "no_artists":
             await ctx.send("❌ **No artists found in the database!** Add some artists first.")
             return
 
@@ -393,7 +390,8 @@ class XPCog(commands.Cog):
 
         # Sour Patch Kids fallback (empty-catalog safeguard): refund and bail nicely.
         if song_id == SOURPATCH_ID:
-            (add_sig_vinyl_count if guaranteed_sig else add_vinyl_count)(ctx.author.id, 1)
+            await asyncio.to_thread(add_vinyls_many,
+                                    {ctx.author.id: (0, 1) if guaranteed_sig else (1, 0)})
             await ctx.send(
                 content="😋 The vinyl machine spat out a **Sour Patch Kids**! Your pull was refunded — try again.",
                 file=discord.File(SOURPATCH_IMAGE, filename="sourpatchkids.png"))
@@ -423,7 +421,9 @@ class XPCog(commands.Cog):
 
         # The song goes in the field *value*: Discord does not render markdown
         # in a field name, so the asterisks showed through literally.
-        owned = get_sig_vinyl_count(ctx.author.id) if guaranteed_sig else get_vinyl_count(ctx.author.id)
+        counts = await asyncio.to_thread(self._keep_vinyl_pull, ctx.author.id, song_id, album_id,
+                                         "sig_vinyl" if is_sig else "vinyl")
+        owned = counts[1] if guaranteed_sig else counts[0]
         remaining = named_emoji('sig_vinyl') if guaranteed_sig else named_emoji('vinyl')
         embed.add_field(
             name=f"{emoji} **{song}** by **{artist}** from *{album[1]}*\n",
@@ -432,42 +432,31 @@ class XPCog(commands.Cog):
 
         embed.set_image(url=f"attachment://{media_name}")
         file = discord.File(media_buf, filename=media_name, spoiler=False)
-
-        add_song_to_collection(ctx.author.id, song_id, album_id,
-                               variant=("sig_vinyl" if is_sig else "vinyl"))
         await ctx.send(embed=embed, file=file)
+
+    @staticmethod
+    def _keep_vinyl_pull(user_id, song_id, album_id, variant):
+        """Add the pulled card; returns the (vinyl, sig) counts left for the embed."""
+        add_song_to_collection(user_id, song_id, album_id, variant=variant)
+        return get_vinyl_counts(user_id) or (0, 0)
 
     @commands.command(aliases=['sv'], description="Pull a guaranteed signature vinyl song")
     async def sigvinyl(self, ctx):
         """Open a signature vinyl"""
         await self._do_vinyl_pull(ctx, guaranteed_sig=True)
 
-    @commands.command(aliases=['v'], description="Pull a vinyl song from your rewards")
+    @commands.command(aliases=['v'], description="Pull a vinyl song from your rewards",
+                      extras={"error_reply": "❌ **Error pulling vinyl song!** It has been logged — please try again."})
     async def vinyl(self, ctx):
         """Open a vinyl with a chance of being a signature vinyl"""
         await self._do_vinyl_pull(ctx, guaranteed_sig=False)
 
-    @vinyl.error
-    async def vinyl_error(self, ctx, error):
-        if isinstance(error, commands.CommandOnCooldown):
-            await ctx.send(f"⏳ Cool down! Try again in {round(error.retry_after)}s.")
-            return
-        # This used to catch commands.CommandError, which covers a wrapped
-        # NameError just as happily as a user mistake -- so every real bug in
-        # .vinyl showed the same friendly text and logged nothing.
-        await report_unhandled(
-            log, ctx, error, command="vinyl",
-            user_message="❌ **Error pulling vinyl song!** It has been logged — please try again.")
-
-    @xp.error
-    async def xp_error(self, ctx, error):
-        if isinstance(error, commands.BadArgument):
-            await ctx.send("❌ **Invalid user!** Please mention a valid user.")
-            return
-        await report_unhandled(log, ctx, error, command="xp")
-
-
-    @commands.command(aliases=['gv'])
+    @commands.command(aliases=['gv'], extras={
+        "missing_arg": "❌ **Missing user!**\n"
+                       "**Usage:** `.givevinyl <user> [amount]`\n"
+                       "**Example:** `.givevinyl @username 5`",
+        "bad_arg": "❌ **Invalid user or amount!** Please mention a valid user and provide a valid number.",
+    })
     @commands.has_role("grails-admin")
     async def givevinyl(self, ctx, user: discord.User, amount: int = 1):
         """Give vinyl pulls to a user (bot-admin only)
@@ -475,7 +464,7 @@ class XPCog(commands.Cog):
         Example: .givevinyl @username 5
         """
         # Check if target user is registered
-        if not user_exists(user.id):
+        if not await asyncio.to_thread(user_exists, user.id):
             await ctx.send(
                 f"❌ **{user.display_name}** is not registered! They need to use `.register` first."
             )
@@ -486,11 +475,9 @@ class XPCog(commands.Cog):
             await ctx.send("❌ **Invalid amount!** Please provide a number between -10000-10000.")
             return
         
-        # Add vinyl pulls to the user
-        add_vinyl_count(user.id, amount)
-        
-        # Get updated vinyl count
-        total_vinyl_count = get_vinyl_count(user.id)
+        # Add vinyl pulls to the user; the statement returns the new count
+        total_vinyl_count = (await asyncio.to_thread(
+            add_vinyls_many, {user.id: (amount, 0)})).get(user.id, (0, 0))[0]
         
         # Create success embed
         embed = discord.Embed(
@@ -518,20 +505,12 @@ class XPCog(commands.Cog):
             # If DM fails (e.g. DMs closed), that's okay - the channel message was sent
             pass
 
-    @givevinyl.error
-    async def givevinyl_error(self, ctx, error):
-        if isinstance(error, commands.MissingRequiredArgument):
-            await ctx.send("❌ **Missing user!**\n"
-                           "**Usage:** `.givevinyl <user> [amount]`\n"
-                           "**Example:** `.givevinyl @username 5`")
-        elif isinstance(error, commands.BadArgument):
-            await ctx.send("❌ **Invalid user or amount!** Please mention a valid user and provide a valid number.")
-        elif isinstance(error, commands.MissingRole):
-            await ctx.send("❌ **Permission denied!** This command requires the `bot-admin` role.")
-        else:
-            await report_unhandled(log, ctx, error, command="givevinyl")
-
-    @commands.command(aliases=['gsv'])
+    @commands.command(aliases=['gsv'], extras={
+        "missing_arg": "❌ **Missing user!**\n"
+                       "**Usage:** `.give_sigvinyl <user> [amount]`\n"
+                       "**Example:** `.give_sigvinyl @username 5`",
+        "bad_arg": "❌ **Invalid user or amount!** Please mention a valid user and provide a valid number.",
+    })
     @commands.has_role("grails-admin")
     async def give_sigvinyl(self, ctx, user: discord.User, amount: int = 1):
         """Give signature vinyl pulls to a user (grails-admin only)
@@ -539,7 +518,7 @@ class XPCog(commands.Cog):
         Example: .give_sigvinyl @username 5
         """
         # Check if target user is registered
-        if not user_exists(user.id):
+        if not await asyncio.to_thread(user_exists, user.id):
             await ctx.send(
                 f"❌ **{user.display_name}** is not registered! They need to use `.register` first."
             )
@@ -550,11 +529,9 @@ class XPCog(commands.Cog):
             await ctx.send("❌ **Invalid amount!** Please provide a number between -10000-10000.")
             return
 
-        # Add signature vinyl pulls to the user
-        add_sig_vinyl_count(user.id, amount)
-        
-        # Get updated vinyl count
-        total_sig_vinyl_count = get_sig_vinyl_count(user.id)
+        # Add signature vinyl pulls to the user; the statement returns the new count
+        total_sig_vinyl_count = (await asyncio.to_thread(
+            add_vinyls_many, {user.id: (0, amount)})).get(user.id, (0, 0))[1]
 
         # Create success embed
         embed = discord.Embed(
@@ -581,20 +558,6 @@ class XPCog(commands.Cog):
         except discord.HTTPException:
             # If DM fails (e.g. DMs closed), that's okay - the channel message was sent
             pass
-
-    @give_sigvinyl.error
-    async def give_sigvinyl_error(self, ctx, error):
-        if isinstance(error, commands.MissingRequiredArgument):
-            await ctx.send("❌ **Missing user!**\n"
-                           "**Usage:** `.give_sigvinyl <user> [amount]`\n"
-                           "**Example:** `.give_sigvinyl @username 5`")
-        elif isinstance(error, commands.BadArgument):
-            await ctx.send("❌ **Invalid user or amount!** Please mention a valid user and provide a valid number.")
-        elif isinstance(error, commands.MissingRole):
-            await ctx.send("❌ **Permission denied!** This command requires the `bot-admin` role.")
-        else:
-            await report_unhandled(log, ctx, error, command="give_sigvinyl")
-
 
 async def setup(bot):
     await bot.add_cog(XPCog(bot))

@@ -120,19 +120,6 @@ def discord_countdown(seconds, style="R"):
     return f"<t:{moment}:{style}>"
 
 
-def format_duration(seconds):
-    """'1m 12s' / '18m' / '2h 05m'. Short enough to sit inline in an embed."""
-    seconds = int(max(seconds, 0))
-    if seconds < 60:
-        return f"{seconds}s"
-    minutes, secs = divmod(seconds, 60)
-    if minutes < 60:
-        # Seconds matter while the wait is short and stop mattering after that.
-        return f"{minutes}m {secs}s" if minutes < 10 else f"{minutes}m"
-    hours, minutes = divmod(minutes, 60)
-    return f"{hours}h {minutes:02d}m"
-
-
 def charge_bar(charges, width=20):
     """A filled/empty bar. Width matches the cap so one block is one charge."""
     filled = max(0, min(int(charges), PULL_CAP))

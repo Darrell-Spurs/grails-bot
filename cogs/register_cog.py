@@ -1,13 +1,17 @@
+import asyncio
 import logging
 
 import discord
 from discord.ext import commands
 
 from utils import aesthetics
-from db import register_user, user_exists, unregister_user, add_sig_vinyl_count
+from db import register_user, unregister_user
 from utils.command_types import slash_only
 
 log = logging.getLogger("grails.register")
+
+# Signature vinyls every new account starts with.
+WELCOME_SIG_VINYLS = 1
 
 class RegisterCog(commands.Cog):
     def __init__(self, bot):
@@ -16,23 +20,15 @@ class RegisterCog(commands.Cog):
     @commands.hybrid_command(description="Register an account to start collecting")
     @slash_only()
     async def register(self, ctx):
-        # Check if user is already registered
-        if user_exists(ctx.author.id):
+        # The account and its welcome gift are one INSERT, which also answers
+        # "already registered": checked and created separately, two /register
+        # calls sent together could both be told to go ahead and both be gifted.
+        created = await asyncio.to_thread(register_user, ctx.author.id, 0, ctx.author.name,
+                                          WELCOME_SIG_VINYLS)
+        if not created:
             await ctx.send(f"❌ **{ctx.author.display_name}**, you are already registered! You can start collecting XPs right away.")
             return
-
-        register_user(ctx.author.id, xp=0, username=ctx.author.name)  # Register user in the database
-
-        # Welcome gift. Granted after the account exists, since the grant is an
-        # UPDATE against the users row.
-        gift = 1
-        try:
-            add_sig_vinyl_count(ctx.author.id, gift)
-        except Exception:
-            # An account with no gift still beats a failed registration, so the
-            # sign-up stands and the gift is logged for a manual top-up.
-            log.exception("welcome signature vinyl failed for %s", ctx.author.id)
-            gift = 0
+        gift = WELCOME_SIG_VINYLS
 
         embed = discord.Embed(
             title=f"Welcome to Grails {aesthetics.named_emoji('vinyl')}",
@@ -54,15 +50,17 @@ class RegisterCog(commands.Cog):
         await ctx.send(embed=embed)
         return
 
-    @commands.command(alias=['ur'])
+    # `aliases`, not `alias`: discord.py ignores an unknown keyword, so `.ur`
+    # never worked under the old spelling.
+    @commands.command(aliases=['ur'])
     @commands.has_role("grails-admin")
     async def unregister(self, ctx, user: discord.User):
         """Unregister a user from the bot"""
-        if not user_exists(user.id):
+        # The DELETE reports whether there was an account to remove.
+        if not await asyncio.to_thread(unregister_user, user.id):
             await ctx.send(f"❌ **{user.name}** is not registered.")
             return
 
-        unregister_user(user.id)
         await ctx.send(f"✅ Successfully Unregistered **{user.name}**!")
         return
 

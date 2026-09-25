@@ -46,11 +46,3 @@ def slash_only():
         return True
     return commands.check(predicate)
 
-
-def prefix_only():
-    """Accept .name, refuse /name."""
-    async def predicate(ctx):
-        if ctx.interaction is not None:
-            raise SlashNotAllowed(ctx.command.qualified_name)
-        return True
-    return commands.check(predicate)

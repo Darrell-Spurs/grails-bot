@@ -21,16 +21,10 @@ from utils import aesthetics
 
 log = logging.getLogger("grails.ui")
 
-# ---------------------------------------------------------------------------
-# Vocabulary lives in utils/aesthetics.py. Re-exported here so the existing
-# `from utils.collection_ui import rarity_emoji, ...` call sites keep working.
-# ---------------------------------------------------------------------------
-
-from utils.aesthetics import (  # noqa: F401
-    ACCENT_COLOR, RARITY_COLOR, RARITY_ORDER, UNASSIGNED,
-    TEXT_PRESENTATION_BASES, VARIANT_COLOR, VARIANT_LABEL, VARIANTS,
-    card_emoji, rarity_emoji, rarity_rank, safe_option_emoji, variant_emoji,
-    variant_rank,
+# Vocabulary lives in utils/aesthetics.py; import it from there, not from here.
+from utils.aesthetics import (
+    RARITY_ORDER, UNASSIGNED, VARIANT_LABEL, VARIANTS,
+    card_emoji, rarity_rank, safe_option_emoji, variant_emoji, variant_rank,
 )
 
 SORTS = {
@@ -86,6 +80,37 @@ def build_card_embed(card, owner_name, copy_number=None, owners=None, pinned=Fal
         footer += f"  ·  pulled {_short_time(card['collected_at'])}"
     embed.set_footer(text=footer)
     return embed
+
+
+async def render_card(card, owner_name, *, owner_icon=None, pinned=None, owner_id=None):
+    """A card screen: (embed, art file or None).
+
+    Every card screen -- /view, a card opened from a collection, the pinned card
+    on a profile, and the re-render after pinning -- used to assemble this
+    itself: art in a worker thread, then three separate queries on the event
+    loop for the copy number, owner count and pin state. Those are one query
+    now, run in a thread *alongside* the art, so the database time hides behind
+    the render instead of adding to it and no longer stalls the bot.
+
+    Pass `pinned` when the caller already knows (a pinned card, a fresh pin);
+    otherwise pass `owner_id` and it is looked up in the same query. The mythic
+    copy number is stored on the card row, so it arrives with the card.
+    """
+    lookup_owner = owner_id if pinned is None else None
+    art, (owners, looked_up) = await asyncio.gather(
+        asyncio.to_thread(card_art_file, card),
+        asyncio.to_thread(db.get_card_screen_stats, card["collection_id"],
+                          card["song_id"], lookup_owner),
+    )
+    embed = build_card_embed(
+        card, owner_name,
+        copy_number=card.get("copy_number"),
+        owners=owners,
+        pinned=bool(looked_up) if pinned is None else pinned,
+        art_filename=ART_FILENAME if art else None,
+        owner_icon=owner_icon,
+    )
+    return embed, art
 
 
 def _short_time(value):
@@ -152,6 +177,19 @@ def build_collection_embed(cards, page, pages, total, owner_name, *, variant=Non
     return embed
 
 
+def load_collection_cards(owner_id, variant=None, artist=None):
+    """One player's cards for a collection view (blocking: run it in a thread).
+
+    Each mythic's copy number arrives on its row; this used to take a second
+    query to work them out for the page.
+    """
+    cards = db.search_user_cards(owner_id, query="", variant=variant, limit=1000)
+    if artist:
+        wanted = artist.lower()
+        cards = [c for c in cards if (c["artist"] or "").lower() == wanted]
+    return cards
+
+
 def sort_cards(cards, sort):
     if sort == "newest":
         return sorted(cards, key=lambda c: str(c.get("collected_at") or ""), reverse=True)
@@ -172,7 +210,27 @@ def sort_cards(cards, sort):
 # Views
 # ---------------------------------------------------------------------------
 
-class _OwnerView(discord.ui.View):
+class DisableOnTimeoutView(discord.ui.View):
+    """A view that greys out its controls when it expires, so a stale message
+    stops offering buttons that would only fail. Set `message` after sending.
+
+    Three views -- this module's, the profile's and the catalog paginator --
+    each carried an identical copy of this.
+    """
+
+    message = None
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+
+class _OwnerView(DisableOnTimeoutView):
     """Base view that only lets the invoking user drive the components."""
 
     def __init__(self, invoker_id, timeout=TIMEOUT):
@@ -195,22 +253,14 @@ class _OwnerView(discord.ui.View):
             return False
         return True
 
-    async def on_timeout(self):
-        for child in self.children:
-            child.disabled = True
-        if self.message:
-            try:
-                await self.message.edit(view=self)
-            except discord.HTTPException:
-                pass
-
     # Defined on the base so the collection list and a single card share one
     # implementation. Subclasses that are not reached from a profile drop it in
     # __init__, so it only ever appears when there is somewhere to go back to.
     @discord.ui.button(label="Back to profile",
                        style=discord.ButtonStyle.secondary, row=0)
     async def back_to_profile(self, interaction, button):
-        rebuilt = self.back_to() if self.back_to else None
+        # `back_to` is async: rebuilding the profile reads the database.
+        rebuilt = await self.back_to() if self.back_to else None
         if rebuilt is None:
             await interaction.response.send_message(
                 "That profile is no longer available.", ephemeral=True)
@@ -320,20 +370,13 @@ class CardView(_OwnerView):
     @discord.ui.button(label="Pin to profile", emoji="\U0001F4CC",
                        style=discord.ButtonStyle.secondary, row=0)
     async def pin_card(self, interaction, button):
-        ok = db.set_pinned_card(self.invoker_id, self.card["collection_id"])
+        ok = await asyncio.to_thread(db.set_pinned_card, self.invoker_id, self.card["collection_id"])
         if not ok:
             await interaction.response.send_message(
                 "Could not pin that card — register with `.register` first.", ephemeral=True)
             return
-        art = await asyncio.to_thread(card_art_file, self.card)
-        embed = build_card_embed(
-            self.card, self.owner_name,
-            copy_number=db.get_card_copy_number(self.card["collection_id"]),
-            owners=db.count_card_owners(self.card["song_id"]),
-            pinned=True,
-            art_filename=ART_FILENAME if art else None,
-            owner_icon=self.owner_icon,
-        )
+        embed, art = await render_card(self.card, self.owner_name,
+                                       owner_icon=self.owner_icon, pinned=True)
         await interaction.response.edit_message(
             embed=embed, view=self, attachments=[art] if art else [])
         await interaction.followup.send(
@@ -343,7 +386,7 @@ class CardView(_OwnerView):
     async def view_artist(self, interaction, button):
         # Shows the card owner's collection for that artist, not the viewer's --
         # otherwise clicking it on someone else's card would jump contexts.
-        view = CollectionView(
+        view = await CollectionView.open(
             invoker_id=self.invoker_id,
             owner_id=self.owner_id,
             owner_name=self.owner_name,
@@ -368,11 +411,19 @@ class CollectionView(_OwnerView):
         """
         return True
 
-    def __init__(self, invoker_id, owner_id, owner_name, *, variant=None,
+    def __init__(self, invoker_id, owner_id, owner_name, *, cards, variant=None,
                  artist=None, sort="variant", back_to=None, owner_icon=None):
+        """Build the view around cards already loaded -- use `await
+        CollectionView.open(...)`, which loads them off the event loop.
+
+        Loading used to happen in here, but a discord.py View can only be
+        created on the event loop's thread, so the database read cannot move
+        to a worker from inside the constructor.
+        """
         super().__init__(invoker_id)
-        # A callable returning (embed, view) for whatever opened this list, or
-        # None when /collection was run directly and there is nowhere to go.
+        # An async callable returning (embed, view) for whatever opened this
+        # list, or None when /collection was run directly and there is nowhere
+        # to go.
         self.back_to = back_to
         self.owner_id = str(owner_id)
         self.owner_name = owner_name
@@ -381,20 +432,22 @@ class CollectionView(_OwnerView):
         self.artist = artist
         self.sort = sort
         self.page = 0
-        self.all_cards = []
-        self.reload()
+        self.all_cards = sort_cards(cards, sort)
         if back_to is None:
             self.remove_item(self.back_to_profile)
 
+    @classmethod
+    async def open(cls, invoker_id, owner_id, owner_name, *, variant=None, artist=None, **kwargs):
+        """Load the collection in a worker thread, then build the view."""
+        cards = await asyncio.to_thread(load_collection_cards, owner_id, variant, artist)
+        return cls(invoker_id, owner_id, owner_name, cards=cards,
+                   variant=variant, artist=artist, **kwargs)
+
     # ---- data ----------------------------------------------------------
-    def reload(self):
-        cards = db.search_user_cards(self.owner_id, query="", variant=self.variant, limit=1000)
-        if self.artist:
-            wanted = self.artist.lower()
-            cards = [c for c in cards if (c["artist"] or "").lower() == wanted]
-        for card in cards:
-            if (card["variant"] or "").lower() == "mythic":
-                card["copy_number"] = db.get_card_copy_number(card["collection_id"])
+    async def reload(self):
+        """Re-read the cards after the variant filter changes."""
+        cards = await asyncio.to_thread(load_collection_cards, self.owner_id,
+                                        self.variant, self.artist)
         self.all_cards = sort_cards(cards, self.sort)
         self.page = min(self.page, max(self.pages - 1, 0))
 
@@ -461,7 +514,7 @@ class CollectionView(_OwnerView):
         if select.values[0] == "none":
             await interaction.response.defer()
             return
-        card = db.get_card(int(select.values[0]))
+        card = await asyncio.to_thread(db.get_card, int(select.values[0]))
         if not card:
             await interaction.response.send_message("That card is gone.", ephemeral=True)
             return
@@ -474,15 +527,8 @@ class CollectionView(_OwnerView):
             owner_id=self.owner_id,
         )
         view.message = self.message
-        art = await asyncio.to_thread(card_art_file, card)
-        embed = build_card_embed(
-            card, self.owner_name,
-            copy_number=db.get_card_copy_number(card["collection_id"]),
-            owners=db.count_card_owners(card["song_id"]),
-            pinned=_is_pinned(self.owner_id, card["collection_id"]),
-            art_filename=ART_FILENAME if art else None,
-            owner_icon=self.owner_icon,
-        )
+        embed, art = await render_card(card, self.owner_name, owner_icon=self.owner_icon,
+                                       owner_id=self.owner_id)
         # attachments=[] clears the list page's own upload, so a plain-cover
         # card cannot inherit the previous screen's picture.
         await interaction.response.edit_message(
@@ -499,7 +545,7 @@ class CollectionView(_OwnerView):
     async def variant_filter(self, interaction, select):
         self.variant = None if select.values[0] == "all" else select.values[0]
         self.page = 0
-        self.reload()
+        await self.reload()
         await self._refresh(interaction)
 
     @discord.ui.select(
@@ -507,12 +553,8 @@ class CollectionView(_OwnerView):
         options=[discord.SelectOption(label=label, value=key) for key, label in SORTS.items()],
     )
     async def sort_by(self, interaction, select):
+        # Re-sorts the cards already loaded: a new order needs no new read.
         self.sort = select.values[0]
         self.page = 0
-        self.reload()
+        self.all_cards = sort_cards(self.all_cards, self.sort)
         await self._refresh(interaction)
-
-
-def _is_pinned(user_id, collection_id):
-    profile = db.get_user_profile(user_id)
-    return bool(profile and profile["pinned_collection_id"] == collection_id)

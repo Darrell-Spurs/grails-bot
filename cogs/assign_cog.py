@@ -1,9 +1,10 @@
+import asyncio
 import sys, os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import discord
 from discord.ext import commands
-from db import get_song_and_album_details, set_song_rarity, get_song_rarity
+from db import get_song_and_album_details, set_song_rarity, assign_basic_bulk
 from utils import aesthetics
 
 rarity_abbr = {
@@ -13,6 +14,14 @@ rarity_abbr = {
     "l": "legendary",
     "ul": "ultimate"
 }
+
+def _lookup_and_assign(song_name, album_name, artist_name, rarity):
+    """get_song_and_album_details, then set the rarity if both were found."""
+    details = get_song_and_album_details(song_name, album_name, artist_name)
+    if details[0] and details[2]:
+        set_song_rarity(details[0], rarity)
+    return details
+
 
 class AssignCog(commands.Cog):
     def __init__(self, bot):
@@ -103,10 +112,9 @@ class AssignCog(commands.Cog):
 
     async def _perform_assignment(self, ctx, song_id, song_name, artist_name, album_name, rarity, song_number=None):
         """Perform the actual rarity assignment"""
-        # Get song and album details from database
-        song_id, song_name_db, album_id, album_name_db, album_url = get_song_and_album_details(
-            song_name, album_name, artist_name
-        )
+        # Look the song up and set its rarity in one thread hop
+        song_id, song_name_db, album_id, album_name_db, album_url = await asyncio.to_thread(
+            _lookup_and_assign, song_name, album_name, artist_name, rarity)
 
         if not song_id:
             await ctx.send(f"❌ **Song not found!**\n"
@@ -117,10 +125,6 @@ class AssignCog(commands.Cog):
             await ctx.send(f"❌ **Album not found!**\n"
                           f"Could not find album `{album_name}` by `{artist_name}` in the database.")
             return
-
-        # Here you would update the song's rarity in the database
-        # For now, we'll just show a success message
-        set_song_rarity(song_id, rarity)
 
         embed = discord.Embed(
             title="✅ Rarity Assigned Successfully!",
@@ -148,29 +152,15 @@ class AssignCog(commands.Cog):
                           "Use the `.list` command first to create an active list, then use `.assign 0` to assign all basic.")
             return
         
-        assigned_count = 0
-        failed_assignments = []
-        
-        for i, song_info in enumerate(active_list):
-            song_id = song_info['id']  # Assuming song_info has an 'id' field
-            song_name = song_info['name']
-            artist_name = song_info['artist']
-            album_name = song_info['album']
-            
-            # Get song and album details from database
-            song_id, song_name_db, album_id, album_name_db, album_url = get_song_and_album_details(
-                song_name, album_name, artist_name
-            )
-            
-            if song_id and album_id:
-                rarity = get_song_rarity(song_id)
-                if rarity in ["ultimate", "legendary", "elite", "unique"]:
-                    continue
-                set_song_rarity(song_id, "basic")
-                assigned_count += 1
-            else:
-                failed_assignments.append(f"{i+1}. {song_name}")
-        
+        # One UPDATE for the whole list, by the ids the list already holds.
+        # This was three round trips per song: a name lookup, a rarity read and
+        # the write -- and the lookup by name could land on a namesake.
+        assigned_count, missing = await asyncio.to_thread(
+            assign_basic_bulk, [song_info['id'] for song_info in active_list])
+        missing = set(missing)
+        failed_assignments = [f"{i+1}. {song_info['name']}"
+                              for i, song_info in enumerate(active_list) if song_info['id'] in missing]
+
         # Create success embed
         embed = discord.Embed(
             title="✅ Bulk Assignment Complete!",
@@ -200,19 +190,6 @@ class AssignCog(commands.Cog):
 
     def _get_rarity_color(self, rarity):
         return discord.Color(aesthetics.rarity_colour_int(rarity))
-
-    @assign.error
-    async def assign_error(self, ctx, error):
-        if isinstance(error, commands.MissingRole):
-            await ctx.send("❌ You need the 'grails-admin' role to use this command!")
-        elif isinstance(error, commands.MissingRequiredArgument):
-            await ctx.send("❌ **Missing arguments!**\n"
-                          "**Usage:** `.assign <number> <rarity>` (from active list)\n"
-                          "**Usage:** `.assign 0` (assigns basic to all songs)\n"
-                          "**Usage:** `.assign <song_name> <rarity>` (direct assignment)\n"
-                          "**Valid rarities:** `basic`, `unique`, `elite`, `legendary`, `ultimate`")
-        else:
-            raise error
 
 async def setup(bot):
     await bot.add_cog(AssignCog(bot))

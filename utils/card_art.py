@@ -14,7 +14,9 @@ import logging
 from io import BytesIO
 
 import discord
+from PIL import Image
 
+from utils.artwork import center_square, fetch_image
 from utils.helpers import create_glitched_effect, create_sketch_effect
 from utils.mystic import mythic_card_bytes
 from utils.vinyl import vinyl_static_bytes, vinyl_static_sig_bytes
@@ -32,40 +34,8 @@ PLAIN_VARIANTS = {"default"}
 
 
 def _cover(url):
-    """The album art as a square RGB image."""
-    # Imported here rather than at module scope: helpers pulls in the whole
-    # pull path, and this keeps the import graph shallow for callers that only
-    # ever hit the plain-cover case.
-    import requests
-    from PIL import Image
-
-    response = requests.get(url, timeout=15)
-    image = Image.open(BytesIO(response.content)).convert("RGB")
-    side = min(image.size)
-    left = (image.width - side) // 2
-    top = (image.height - side) // 2
-    return image.crop((left, top, left + side, top + side)).resize(
-        (ART_SIZE, ART_SIZE), Image.LANCZOS)
-
-
-def _copy_number(card):
-    """This mythic's copy number, from the card if it carries one.
-
-    Collection rows already resolve it for their listing; /view does not, so it
-    is looked up rather than left blank on the one surface that shows the card
-    largest.
-    """
-    if card.get("copy_number"):
-        return card["copy_number"]
-    collection_id = card.get("collection_id")
-    if not collection_id:
-        return None
-    try:
-        import db
-        return db.get_card_copy_number(collection_id)
-    except Exception:
-        log.exception("copy number lookup failed for %s", collection_id)
-        return None
+    """The album art as a square RGB image, ART_SIZE on a side."""
+    return center_square(fetch_image(url)).resize((ART_SIZE, ART_SIZE), Image.LANCZOS)
 
 
 def render_card_art(card):
@@ -92,7 +62,9 @@ def render_card_art(card):
         if variant == "mythic":
             # Seeded on the card's own id so the glitter is identical every
             # time this card is viewed, rather than reshuffling on each open.
-            return mythic_card_bytes(url, copy_number=_copy_number(card),
+            # The copy number is stored on the card row (db._card_dict), so
+            # it no longer needs a lookup of its own here.
+            return mythic_card_bytes(url, copy_number=card.get("copy_number"),
                                      size=ART_SIZE, seed=card.get("collection_id"),
                                      rarity=rarity)
 

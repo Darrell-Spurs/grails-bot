@@ -182,11 +182,6 @@ def normalise_rarity(value, strict=False):
     return UNASSIGNED
 
 
-def variant_label(variant):
-    v = _key(variant, "default")
-    return VARIANT_LABEL.get(v, v)
-
-
 # ---------------------------------------------------------------------------
 # Card emoji: one glyph per (rarity, variant) pair
 #

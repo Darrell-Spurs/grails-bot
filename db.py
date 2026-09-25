@@ -5,6 +5,7 @@ import re
 import sqlite3
 import threading
 import time
+import uuid
 
 from utils import economy, odds
 
@@ -349,6 +350,26 @@ def _pg_index(name, ddl):
             f"{ddl}; END IF; END $$")
 
 
+# Gives every mythic copy that has no number yet the next ones for its song, in
+# claim order (collected_at, then id). On the first boot that numbers every
+# existing copy exactly as players already saw it; afterwards it only finds a
+# copy inserted by a build that predates the column. Guarded like the schema
+# statements, so a boot with nothing to number takes no lock.
+BACKFILL_COPY_NUMBERS_PG = """DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM collections WHERE variant = 'mythic' AND copy_number IS NULL) THEN
+        UPDATE collections c SET copy_number = n.num
+        FROM (SELECT x.id,
+                     COALESCE((SELECT MAX(y.copy_number) FROM collections y
+                               WHERE y.song_id = x.song_id AND y.variant = 'mythic'), 0)
+                     + ROW_NUMBER() OVER (PARTITION BY x.song_id
+                                          ORDER BY x.collected_at, x.id) AS num
+              FROM collections x
+              WHERE x.variant = 'mythic' AND x.copy_number IS NULL) n
+        WHERE c.id = n.id;
+    END IF;
+END $$"""
+
+
 _POSTGRES_SCHEMA = (
     # CITEXT gives case-insensitive equality/LIKE on the columns the bot looks up
     # by name, which is what COLLATE NOCASE provides on SQLite.
@@ -433,6 +454,19 @@ _POSTGRES_SCHEMA = (
         album_url TEXT,
         artist TEXT
     )""",
+
+    # A mythic's copy number is stored on its row, set once when it is claimed.
+    # It used to be recomputed on every read by counting earlier claims, which
+    # renumbered every later copy whenever one was deleted, and two readers
+    # broke ties differently.
+    _pg_add_column("collections", "copy_number", "INTEGER DEFAULT NULL"),
+    BACKFILL_COPY_NUMBERS_PG,
+    # One of each number per song. This is also what keeps two claims racing
+    # for the same song honest: both pick the same number, the index refuses
+    # the second, and it retries (see claim_mythic).
+    _pg_index("collections_mythic_copy_unique",
+              "CREATE UNIQUE INDEX IF NOT EXISTS collections_mythic_copy_unique "
+              "ON collections (song_id, copy_number) WHERE variant = 'mythic'"),
 
     *(_pg_index(name, f"CREATE INDEX IF NOT EXISTS {name} ON {target}") for name, target in (
         ("idx_user", "collections(user_id)"),
@@ -599,6 +633,14 @@ def init_db():
         if col not in user_cols:
             c.execute(ddl)
 
+    # ---- mythic copy numbers, stored on the row (see _POSTGRES_SCHEMA) ----
+    c.execute("PRAGMA table_info(collections)")
+    if "copy_number" not in {row[1] for row in c.fetchall()}:
+        c.execute("ALTER TABLE collections ADD COLUMN copy_number INTEGER DEFAULT NULL")
+    _backfill_copy_numbers_sqlite(c)
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS collections_mythic_copy_unique "
+              "ON collections(song_id, copy_number) WHERE variant = 'mythic'")
+
     # ---- indexes for the common hot-path filters ----
     c.execute("CREATE INDEX IF NOT EXISTS idx_collections_user_variant ON collections(user_id, variant)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_collections_song_variant ON collections(song_id, variant)")
@@ -614,34 +656,31 @@ def init_db():
     conn.commit()
     conn.close()
 
-def alter_users_table():
-    """Add xp and last_daily_claim columns to existing users table if they don't exist"""
-    conn = get_connection()
-    c = conn.cursor()
-    
-    try:
-        # Check what columns already exist
-        c.execute("PRAGMA table_info(users)")
-        columns = [column[1] for column in c.fetchall()]
-        
-        if 'xp' not in columns:
-            c.execute("ALTER TABLE users ADD COLUMN xp INTEGER DEFAULT 0")
-            print("Added xp column to users table")
-        else:
-            print("xp column already exists in users table")
-            
-        if 'last_daily_claim' not in columns:
-            c.execute("ALTER TABLE users ADD COLUMN last_daily_claim TIMESTAMP DEFAULT NULL")
-            print("Added last_daily_claim column to users table")
-        else:
-            print("last_daily_claim column already exists in users table")
-            
-        conn.commit()
-    except Exception as e:
-        print(f"Error altering users table: {e}")
-        conn.rollback()
-    finally:
-        conn.close()
+
+def _backfill_copy_numbers_sqlite(c):
+    """BACKFILL_COPY_NUMBERS_PG for SQLite, numbered in Python: a SQLite UPDATE
+    whose subqueries read the table being changed sees its own earlier rows."""
+    c.execute("""SELECT id, song_id FROM collections
+                 WHERE variant = 'mythic' AND copy_number IS NULL
+                 ORDER BY song_id, collected_at, id""")
+    pending = c.fetchall()
+    if not pending:
+        return
+    c.execute("""SELECT song_id, MAX(copy_number) FROM collections
+                 WHERE variant = 'mythic' GROUP BY song_id""")
+    last = {song_id: top or 0 for song_id, top in c.fetchall()}
+    for collection_id, song_id in pending:
+        last[song_id] = last.get(song_id, 0) + 1
+        c.execute("UPDATE collections SET copy_number = ? WHERE id = ?",
+                  (last[song_id], collection_id))
+
+
+def _is_unique_violation(exc):
+    """True when `exc` is a unique index refusing a row, on either backend."""
+    if isinstance(exc, sqlite3.IntegrityError):
+        return "UNIQUE" in str(exc).upper()
+    return type(exc).__name__ == "UniqueViolation"
+
 
 def _uid(user_id):
     """Normalise a Discord user id to the TEXT form the id columns use.
@@ -709,54 +748,90 @@ def _catalog_cached(key, load):
     return value
 
 
-def add_song(song_id, name, artist, rarity=UNASSIGNED):
+# Rows per multi-row INSERT. SQLite builds before 3.32 cap a statement at 999
+# bound values, and the widest row here has 5 columns.
+_INSERT_CHUNK = 150
+
+
+def _insert_rows(c, head, rows):
+    """INSERT OR IGNORE `rows` in multi-row statements. Returns rows inserted.
+
+    `head` is everything up to VALUES, e.g. "INSERT OR IGNORE INTO t (a, b)".
+    On Postgres the translation layer turns OR IGNORE into ON CONFLICT DO
+    NOTHING, and rowcount counts only the rows that actually went in.
+    """
+    inserted = 0
+    for start in range(0, len(rows), _INSERT_CHUNK):
+        chunk = rows[start:start + _INSERT_CHUNK]
+        row_sql = "(" + ", ".join("?" * len(chunk[0])) + ")"
+        c.execute(f"{head} VALUES " + ", ".join([row_sql] * len(chunk)),
+                  tuple(v for row in chunk for v in row))
+        inserted += max(c.rowcount, 0)
+    return inserted
+
+
+def save_artist_catalog(artist, artist_id, albums, tracks):
+    """Write one artist import -- albums, songs and their links -- in one
+    transaction.
+
+        albums: [(album_id, name, image)]
+        tracks: [(spotify_track_id, song_name, album_id, album_name)]
+
+    Returns {"new_albums", "new_songs", "new_links"} -- what was not already
+    there -- plus "unmatched", tracks that could not be linked to a song (see
+    below; in practice always 0). The import used to write a row at a time -- an album, then per
+    track a song insert (plus a lookup when it already existed) and a link --
+    which for a large discography was well over a thousand round trips to
+    the database. This is a handful of multi-row statements, and a failure
+    part-way leaves nothing behind instead of half an artist.
+
+    A song name shared by several tracks (the album cut and the single) is one
+    song linked to each of them, as before. New songs start unassigned: an
+    admin gives them a tier, and nothing unassigned can drop until then.
+    """
+    names = list(dict.fromkeys(name for _, name, _, _ in tracks))
     conn = get_connection()
     c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO songs (id, name, artist, rarity) VALUES (?, ?, ?, ?)", (song_id, name, artist, rarity))
-    
-    song_id = None
-    if c.rowcount == 0:
-        # Insert was ignored → fetch existing song_id
-        c.execute("SELECT id FROM songs WHERE name = ? AND artist = ?", (name, artist))
-        existing = c.fetchone()
-        song_id = existing[0]
-    conn.commit()
-    conn.close()
+    try:
+        _begin(conn)
+        new_albums = _insert_rows(
+            c, "INSERT OR IGNORE INTO albums (id, name, artist, artist_id, image)",
+            [(album_id, name, artist, artist_id, image) for album_id, name, image in albums])
 
-    return song_id
+        new_songs = _insert_rows(
+            c, "INSERT OR IGNORE INTO songs (id, name, artist, rarity)",
+            [(uuid.uuid4().hex[:8], name, artist, UNASSIGNED) for name in names])
 
-def add_album(album_id, name, artist, artist_id, image):
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO albums (id, name, artist, artist_id, image) VALUES (?, ?, ?, ?, ?)", (album_id, name, artist, artist_id, image))
-    conn.commit()
-    conn.close()
+        # The ids of every song these tracks belong to, new or already there.
+        # Matched exactly in Python: songs are unique on the exact (name,
+        # artist) text, while on Postgres the artist comparison here is
+        # case-insensitive and can bring back a differently-cased namesake.
+        c.execute("SELECT id, name, artist FROM songs WHERE artist = ?", (artist,))
+        song_ids = {(name, owner): song_id for song_id, name, owner in c.fetchall()}
+
+        links, unmatched = [], 0
+        for track_id, name, album_id, album_name in tracks:
+            song_id = song_ids.get((name, artist))
+            if song_id is None:
+                # Only reachable if a freshly drawn 8-hex id collided with an
+                # existing song's, which dropped that song's insert.
+                unmatched += 1
+                continue
+            links.append((song_id, track_id, album_id, album_name))
+        new_links = _insert_rows(
+            c, "INSERT OR IGNORE INTO song_album (song_id, spotify_song_id, album_id, album_name)",
+            links)
+
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
     _invalidate_catalog()
+    return {"new_albums": new_albums, "new_songs": new_songs,
+            "new_links": new_links, "unmatched": unmatched}
 
-def link_song_album(song_id, spotify_song_id, album_id, album_name):
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO song_album (song_id, spotify_song_id, album_id, album_name) VALUES (?, ?, ?, ?)", (song_id, spotify_song_id, album_id, album_name))
-    conn.commit()
-    conn.close()
-    _invalidate_catalog()
-
-def add_song_to_user(user_id, song_id):
-    user_id = _uid(user_id)
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO collections (user_id, song_id) VALUES (?, ?)", (user_id, song_id))
-    conn.commit()
-    conn.close()
-
-def get_albums_by_artist(artist_name):
-    """Get all albums by a specific artist from the database"""
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("SELECT id, name FROM albums WHERE artist = ?", (artist_name,))
-    results = c.fetchall()
-    conn.close()
-    return results  # List of (album_id, album_name)
 
 def get_all_artists():
     """Get all unique artists from the database. Cached; see _catalog_cached."""
@@ -768,6 +843,16 @@ def get_all_artists():
         conn.close()
         return [row[0] for row in results]
     return list(_catalog_cached("artists", load))  # List of artist names
+
+
+def find_artist(name):
+    """The catalogue's own spelling of `name`, matched case-insensitively, or None.
+
+    Four admin commands each carried their own copy of this loop. It reads the
+    cached artist list, so resolving a name costs no query.
+    """
+    wanted = name.lower()
+    return next((a for a in get_all_artists() if a.lower() == wanted), None)
 
 def get_album_song_counts(artist):
     """[(album_name, song_count)] for one artist, fullest release first.
@@ -984,6 +1069,10 @@ def get_album_details_by_song(song_id):
     return result 
 
 def add_song_to_collection(user_id, song_id, album_id, variant='default'):
+    """Add a card. A mythic goes through claim_mythic instead, since it needs a
+    copy number and has a cap -- its (status, copy_number) is returned."""
+    if variant == "mythic":
+        return claim_mythic(user_id, song_id, album_id)
     user_id = _uid(user_id)
     conn = get_connection()
     c = conn.cursor()
@@ -991,248 +1080,6 @@ def add_song_to_collection(user_id, song_id, album_id, variant='default'):
         INSERT INTO collections (user_id, song_id, album_id, variant)
         VALUES (?, ?, ?, ?)
     """, (user_id, song_id, album_id, variant))
-    conn.commit()
-    conn.close()
-
-def get_collection_by_user(user_id):
-    user_id = _uid(user_id)
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("""
-        SELECT songs.name, songs.artist, collections.variant, albums.name, albums.image
-        FROM collections
-        JOIN songs ON collections.song_id = songs.id
-        JOIN albums ON collections.album_id = albums.id
-        WHERE collections.user_id = ?
-        ORDER BY
-            CASE collections.variant
-                WHEN 'mythic' THEN 1
-                WHEN 'sig_vinyl' THEN 2
-                WHEN 'vinyl' THEN 3
-                WHEN 'sketch' THEN 4
-                WHEN 'glitched' THEN 5
-                WHEN 'default' THEN 6
-                ELSE 7
-            END,
-            songs.artist ASC,
-            songs.name ASC,
-            albums.name ASC
-    """, (user_id,))
-    results = c.fetchall()
-    conn.close()
-    return results 
-
-def get_collection_by_artist(user_id, artist_name):
-    user_id = _uid(user_id)
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("""
-        SELECT songs.name, songs.artist, collections.variant, albums.name, albums.image
-        FROM collections
-        JOIN songs ON collections.song_id = songs.id
-        JOIN albums ON collections.album_id = albums.id
-        WHERE collections.user_id = ? AND songs.artist = ? COLLATE NOCASE
-        ORDER BY CASE collections.variant
-            WHEN 'mythic' THEN 1
-            WHEN 'sig_vinyl' THEN 2
-            WHEN 'vinyl' THEN 3
-            WHEN 'sketch' THEN 4
-            WHEN 'glitched' THEN 5
-            WHEN 'default' THEN 6
-            ELSE 7
-        END, songs.artist ASC
-    """, (user_id, artist_name))
-    results = c.fetchall()
-    conn.close()
-    return results  # List of (song_name, artist_name, variant, album_name, album_image)
-
-def get_collection_by_rarity(user_id, rarity):
-    user_id = _uid(user_id)
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("""
-        SELECT songs.name, songs.artist, collections.variant, albums.name, albums.image
-        FROM collections
-        JOIN songs ON collections.song_id = songs.id
-        JOIN albums ON collections.album_id = albums.id
-        WHERE collections.user_id = ? AND collections.variant = ?
-        ORDER BY CASE collections.variant
-            WHEN 'mythic' THEN 1
-            WHEN 'sig_vinyl' THEN 2
-            WHEN 'vinyl' THEN 3
-            WHEN 'sketch' THEN 4
-            WHEN 'glitched' THEN 5
-            WHEN 'default' THEN 6
-            ELSE 7
-        END, songs.artist ASC
-    """, (user_id, rarity))
-    results = c.fetchall()
-    conn.close()
-    return results  # List of (song_name, artist_name, variant, album_name, album_image)
-
-def get_collection_by_rarity_and_artist(user_id, rarity, artist_name):
-    user_id = _uid(user_id)
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("""
-        SELECT songs.name, songs.artist, collections.variant, albums.name, albums.image
-        FROM collections
-        JOIN songs ON collections.song_id = songs.id
-        JOIN albums ON collections.album_id = albums.id
-        WHERE collections.user_id = ? AND collections.variant = ? AND songs.artist = ? COLLATE NOCASE
-        ORDER BY CASE collections.variant
-            WHEN 'mythic' THEN 1
-            WHEN 'sig_vinyl' THEN 2
-            WHEN 'vinyl' THEN 3
-            WHEN 'sketch' THEN 4
-            WHEN 'glitched' THEN 5
-            WHEN 'default' THEN 6
-            ELSE 7
-        END, songs.artist ASC
-    """, (user_id, rarity, artist_name))
-    results = c.fetchall()
-    conn.close()
-    return results  # List of (song_name, artist_name, variant, album_name, album_image)
-
-def get_collection_by_rarity_with_copy_numbers(user_id, rarity):
-    """Get user's collection filtered by rarity, including copy numbers for mythic items"""
-    user_id = _uid(user_id)
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("""
-        SELECT 
-            songs.name, 
-            songs.artist, 
-            collections.variant, 
-            albums.name, 
-            albums.image,
-            CASE 
-                WHEN collections.variant = 'mythic' THEN
-                    (SELECT COUNT(*) + 1
-                     FROM collections c2
-                     WHERE c2.song_id = collections.song_id 
-                     AND c2.variant = 'mythic' 
-                     AND c2.collected_at < collections.collected_at)
-                ELSE 1
-            END as copy_number,
-            songs.rarity,
-            collections.id
-        FROM collections
-        JOIN songs ON collections.song_id = songs.id
-        JOIN albums ON collections.album_id = albums.id
-        WHERE collections.user_id = ? AND collections.variant = ?
-        ORDER BY
-            CASE songs.rarity
-                WHEN 'ultimate' THEN 1
-                WHEN 'legendary' THEN 2
-                WHEN 'elite' THEN 3
-                WHEN 'unique' THEN 4
-                WHEN 'basic' THEN 5
-                ELSE 6
-            END ASC,
-            songs.artist ASC,
-            songs.name ASC,
-            albums.name ASC
-    """, (user_id, rarity))
-    results = c.fetchall()
-    conn.close()
-    return results
-
-def get_collection_by_artist_with_copy_numbers(user_id, artist_name):
-    """Get user's collection filtered by artist, including copy numbers for mythic items"""
-    user_id = _uid(user_id)
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("""
-        SELECT 
-            songs.name, 
-            songs.artist, 
-            collections.variant, 
-            albums.name, 
-            albums.image,
-            CASE 
-                WHEN collections.variant = 'mythic' THEN
-                    (SELECT COUNT(*) + 1
-                     FROM collections c2
-                     WHERE c2.song_id = collections.song_id 
-                     AND c2.variant = 'mythic' 
-                     AND c2.collected_at < collections.collected_at)
-                ELSE 1
-            END as copy_number,
-            songs.rarity,
-            collections.id
-        FROM collections
-        JOIN songs ON collections.song_id = songs.id
-        JOIN albums ON collections.album_id = albums.id
-        WHERE collections.user_id = ? AND LOWER(songs.artist) LIKE LOWER(?)
-        ORDER BY
-            CASE songs.rarity
-                WHEN 'ultimate' THEN 1
-                WHEN 'legendary' THEN 2
-                WHEN 'elite' THEN 3
-                WHEN 'unique' THEN 4
-                WHEN 'basic' THEN 5
-                ELSE 6
-            END ASC,
-            songs.artist ASC,
-            songs.name ASC,
-            albums.name ASC
-    """, (user_id, f"%{artist_name}%"))
-    results = c.fetchall()
-    conn.close()
-    return results
-
-def get_collection_by_rarity_and_artist_with_copy_numbers(user_id, rarity, artist_name):
-    """Get user's collection filtered by rarity and artist, including copy numbers for mythic items"""
-    user_id = _uid(user_id)
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("""
-        SELECT 
-            songs.name, 
-            songs.artist, 
-            collections.variant, 
-            albums.name, 
-            albums.image,
-            CASE 
-                WHEN collections.variant = 'mythic' THEN
-                    (SELECT COUNT(*) + 1
-                     FROM collections c2
-                     WHERE c2.song_id = collections.song_id 
-                     AND c2.variant = 'mythic' 
-                     AND c2.collected_at < collections.collected_at)
-                ELSE 1
-            END as copy_number,
-            songs.rarity,
-            collections.id
-        FROM collections
-        JOIN songs ON collections.song_id = songs.id
-        JOIN albums ON collections.album_id = albums.id
-        WHERE collections.user_id = ? AND collections.variant = ? AND LOWER(songs.artist) LIKE LOWER(?)
-        ORDER BY
-            CASE songs.rarity
-                WHEN 'ultimate' THEN 1
-                WHEN 'legendary' THEN 2
-                WHEN 'elite' THEN 3
-                WHEN 'unique' THEN 4
-                WHEN 'basic' THEN 5
-                ELSE 6
-            END ASC,
-            songs.artist ASC,
-            songs.name ASC,
-            albums.name ASC
-    """, (user_id, rarity, f"%{artist_name}%"))
-    results = c.fetchall()
-    conn.close()
-    return results
-
-def remove_mythic_from_collection():
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("""
-        DELETE FROM collections
-        WHERE variant = 'mythic'
-    """)
     conn.commit()
     conn.close()
 
@@ -1265,13 +1112,15 @@ def get_user_tradeable_items(user_id, rarity=None, artist=None):
     the whole collection, which is what the trade autocompletes want before the
     player has chosen anything.
 
-    Same column order as get_user_song_by_details:
-    (collection_id, song_id, album_id, song_name, artist_name, variant, album_name, rarity)."""
+    Column order (shared with get_collection_item_by_id):
+    (collection_id, song_id, album_id, song_name, artist_name, variant,
+     album_name, rarity, copy_number) -- copy_number is None except on mythics."""
     user_id = _uid(user_id)
     conn = get_connection()
     c = conn.cursor()
     sql = """
-        SELECT collections.id, songs.id, albums.id, songs.name, songs.artist, collections.variant, albums.name, songs.rarity
+        SELECT collections.id, songs.id, albums.id, songs.name, songs.artist, collections.variant, albums.name, songs.rarity,
+               collections.copy_number
         FROM collections
         JOIN songs ON collections.song_id = songs.id
         JOIN albums ON collections.album_id = albums.id
@@ -1292,12 +1141,13 @@ def get_user_tradeable_items(user_id, rarity=None, artist=None):
 
 def get_collection_item_by_id(collection_id, user_id):
     """Get a single collection row by its id, scoped to a user (ownership check).
-    Same column order as get_user_song_by_details."""
+    Same column order as get_user_tradeable_items."""
     user_id = _uid(user_id)
     conn = get_connection()
     c = conn.cursor()
     c.execute("""
-        SELECT collections.id, songs.id, albums.id, songs.name, songs.artist, collections.variant, albums.name, songs.rarity
+        SELECT collections.id, songs.id, albums.id, songs.name, songs.artist, collections.variant, albums.name, songs.rarity,
+               collections.copy_number
         FROM collections
         JOIN songs ON collections.song_id = songs.id
         JOIN albums ON collections.album_id = albums.id
@@ -1310,10 +1160,9 @@ def get_collection_item_by_id(collection_id, user_id):
 def transfer_collection_item(collection_id, from_user_id, to_user_id):
     """Move one card between players. True if it moved, False if it was not theirs.
 
-    Reassigns the existing row rather than deleting and re-inserting it. The row
-    id and collected_at are what decide a mythic's copy number, so a
-    delete-then-insert would silently renumber it -- copy #1 could become #3
-    just by being gifted.
+    Reassigns the existing row rather than deleting and re-inserting it, so the
+    card keeps its id, its pull date and -- for a mythic -- the copy number
+    stored on it.
 
     The WHERE clause carries the old owner, so a stale id cannot move somebody
     else's card.
@@ -1330,14 +1179,54 @@ def transfer_collection_item(collection_id, from_user_id, to_user_id):
     return moved
 
 
-def register_user(user_id, xp=0, username=None):
-    """Register a new user in the database"""
+def swap_collection_items(first_id, first_owner, second_id, second_owner):
+    """Complete a trade: each card goes to the other owner, or neither moves.
+
+    The two moves used to be separate calls, so a trade whose second card had
+    been gifted away in the meantime still handed over the first one and then
+    reported failure -- a one-sided trade with nothing to undo it. Both rows
+    now move in one statement inside a transaction, each guarded by its
+    current owner, and anything short of both moving is rolled back.
+    """
+    first_owner, second_owner = _uid(first_owner), _uid(second_owner)
+    conn = get_connection()
+    c = conn.cursor()
+    try:
+        _begin(conn)
+        c.execute("""
+            UPDATE collections SET user_id = CASE WHEN id = ? THEN ? ELSE ? END
+            WHERE (id = ? AND user_id = ?) OR (id = ? AND user_id = ?)
+        """, (first_id, second_owner, first_owner,
+              first_id, first_owner, second_id, second_owner))
+        if c.rowcount != 2:
+            conn.rollback()
+            return False
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def register_user(user_id, xp=0, username=None, sig_vinyl_count=0):
+    """Create an account. True if this call created it, False if it existed.
+
+    A welcome gift is passed as `sig_vinyl_count` so it lands in the same
+    INSERT: it is granted exactly when the account is created, and two
+    /register calls sent together cannot both see "not registered" and both
+    hand it out.
+    """
     user_id = _uid(user_id)
     conn = get_connection()
     c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO users (id, xp, username) VALUES (?, ?, ?)", (user_id, xp, username))
+    c.execute("INSERT OR IGNORE INTO users (id, xp, username, sig_vinyl_count) VALUES (?, ?, ?, ?)",
+              (user_id, xp, username, sig_vinyl_count))
+    created = c.rowcount > 0
     conn.commit()
     conn.close()
+    return created
 
 def get_song_and_album_details(song_name, album_name, artist):
     """Get song_id, album_id, and album_url by song name, album name, and artist.
@@ -1376,8 +1265,11 @@ def get_songs_by_artist_and_album_category(artist_name, album_name=None):
     If album_name is provided, returns songs from that specific album.
     Album categories:
     - 8+ songs: album
-    - 4-7 songs: EP  
+    - 4-7 songs: EP
     - 3 or less: single
+
+    The singles and specific-album forms return (id, name, album, track_count,
+    rarity). The rarity rides along so /list does not look it up once per song.
     """
     conn = get_connection()
     c = conn.cursor()
@@ -1386,8 +1278,9 @@ def get_songs_by_artist_and_album_category(artist_name, album_name=None):
         # Get songs from albums with 3 or fewer tracks (singles)
         # Exclude songs that also appear on albums/EPs (4+ tracks)
         c.execute("""
-            SELECT songs.id, songs.name, albums.name as album_name, 
-                   COUNT(song_album.song_id) OVER (PARTITION BY albums.id) as track_count
+            SELECT songs.id, songs.name, albums.name as album_name,
+                   COUNT(song_album.song_id) OVER (PARTITION BY albums.id) as track_count,
+                   songs.rarity
             FROM songs
             JOIN song_album ON songs.id = song_album.song_id
             JOIN albums ON song_album.album_id = albums.id
@@ -1413,7 +1306,8 @@ def get_songs_by_artist_and_album_category(artist_name, album_name=None):
         # Get songs from specific album
         c.execute("""
             SELECT songs.id, songs.name, albums.name as album_name,
-                   COUNT(song_album.song_id) OVER (PARTITION BY albums.id) as track_count
+                   COUNT(song_album.song_id) OVER (PARTITION BY albums.id) as track_count,
+                   songs.rarity
             FROM songs
             JOIN song_album ON songs.id = song_album.song_id
             JOIN albums ON song_album.album_id = albums.id
@@ -1442,6 +1336,38 @@ def get_album_category(track_count):
         return "EP"
     else:
         return "Single"
+
+# Tiers `.assign 0` leaves alone: it only fills in songs that have none yet.
+_PRESERVED_TIERS = ("ultimate", "legendary", "elite", "unique")
+
+
+def assign_basic_bulk(song_ids):
+    """`.assign 0`: set every listed song without a higher tier to basic.
+
+    Returns (assigned, missing): how many songs were set, and which ids no
+    longer exist. One UPDATE for the whole list -- this used to be three
+    round trips per song (find it by name, read its rarity, write it), ~60
+    for a 20-track album.
+    """
+    ids = list(dict.fromkeys(song_ids))
+    if not ids:
+        return 0, []
+    placeholders = ",".join("?" * len(ids))
+    tiers = ",".join("?" * len(_PRESERVED_TIERS))
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute(f"SELECT id FROM songs WHERE id IN ({placeholders})", tuple(ids))
+    present = {row[0] for row in c.fetchall()}
+    c.execute(f"""
+        UPDATE songs SET rarity = 'basic'
+        WHERE id IN ({placeholders})
+          AND (rarity IS NULL OR LOWER(rarity) NOT IN ({tiers}))
+    """, (*ids, *_PRESERVED_TIERS))
+    assigned = c.rowcount
+    conn.commit()
+    conn.close()
+    return assigned, [song_id for song_id in ids if song_id not in present]
+
 
 def set_song_rarity(song_id, rarity):
     """Set the rarity of a song given its song_id"""
@@ -1567,17 +1493,6 @@ def get_user_xp(user_id):
     conn.close()
     return result[0] if result else 0
 
-def update_user_xp(user_id, xp):
-    """Update the XP of a user"""
-    user_id = _uid(user_id)
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("UPDATE users SET xp = ? WHERE id = ?", (xp, user_id))
-    rows_affected = c.rowcount
-    conn.commit()
-    conn.close()
-    return rows_affected > 0
-
 def add_user_xp(user_id, xp_to_add):
     """Add XP to a user's current XP"""
     user_id = _uid(user_id)
@@ -1589,19 +1504,73 @@ def add_user_xp(user_id, xp_to_add):
     conn.close()
     return rows_affected > 0
 
-def get_user_stats(user_id):
-    """Get user's xp"""
-    user_id = _uid(user_id)
+
+def _case_by_id(values):
+    """`CASE id WHEN ? THEN ? ... END` and its parameters, for per-user
+    amounts in one UPDATE."""
+    return ("CASE id " + " ".join("WHEN ? THEN ?" for _ in values) + " END",
+            [v for pair in values.items() for v in pair])
+
+
+def add_user_xp_many(amounts):
+    """Add XP to one or more players in one statement.
+
+    `amounts` is {user_id: xp}; returns {user_id: (xp_before, xp_after)} with
+    the caller's own keys, leaving out anyone who is not registered.
+
+    Both numbers come out of the UPDATE itself (RETURNING), so a level-up is
+    judged on exactly this grant. Reading the XP first and adding it after,
+    as every caller used to, could see a second grant for the same player
+    land in between and pay the same level twice. A song battle's XP for all
+    its players, a round trip and more each before, is one statement too.
+    """
+    keys = {_uid(user_id): user_id for user_id in amounts}
+    gains = {_uid(user_id): int(round(xp)) for user_id, xp in amounts.items()}
+    if not gains:
+        return {}
+    case, case_params = _case_by_id(gains)
     conn = get_connection()
     c = conn.cursor()
-    c.execute("SELECT xp FROM users WHERE id = ?", (user_id,))
-    result = c.fetchone()
+    c.execute(f"""
+        UPDATE users SET xp = COALESCE(xp, 0) + {case}
+        WHERE id IN ({",".join("?" * len(gains))})
+        RETURNING id, xp
+    """, (*case_params, *gains))
+    after = dict(c.fetchall())
+    conn.commit()
     conn.close()
-    if result:
-        return {
-            'xp': result[0],
-        }
-    return None
+    return {keys[user_id]: (after[user_id] - gains[user_id], after[user_id])
+            for user_id in gains if user_id in after}
+
+
+def add_vinyls_many(amounts):
+    """Add vinyl and signature vinyl pulls for one or more players in one
+    statement -- level-up rewards, or an admin grant.
+
+    `amounts` is {user_id: (vinyls, sig_vinyls)}; returns {user_id:
+    (vinyl_count, sig_vinyl_count)} as they stand afterwards, which is what
+    every caller goes on to show, so no second read is needed. Players who
+    are not registered are left out.
+    """
+    keys = {_uid(user_id): user_id for user_id in amounts}
+    if not keys:
+        return {}
+    vinyls, vinyl_params = _case_by_id({_uid(u): v for u, (v, _) in amounts.items()})
+    sigs, sig_params = _case_by_id({_uid(u): s for u, (_, s) in amounts.items()})
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute(f"""
+        UPDATE users
+        SET vinyl_count = COALESCE(vinyl_count, 0) + {vinyls},
+            sig_vinyl_count = COALESCE(sig_vinyl_count, 0) + {sigs}
+        WHERE id IN ({",".join("?" * len(keys))})
+        RETURNING id, vinyl_count, sig_vinyl_count
+    """, (*vinyl_params, *sig_params, *keys))
+    after = {user_id: (vinyl or 0, sig or 0) for user_id, vinyl, sig in c.fetchall()}
+    conn.commit()
+    conn.close()
+    return {keys[user_id]: after[user_id] for user_id in keys if user_id in after}
+
 
 def user_exists(user_id):
     """Check if a user exists in the database"""
@@ -1622,17 +1591,6 @@ def get_last_daily_claim(user_id):
     result = c.fetchone()
     conn.close()
     return result[0] if result else None
-
-def update_daily_claim(user_id):
-    """Update the last daily claim timestamp for a user to now"""
-    user_id = _uid(user_id)
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("UPDATE users SET last_daily_claim = CURRENT_TIMESTAMP WHERE id = ?", (user_id,))
-    rows_affected = c.rowcount
-    conn.commit()
-    conn.close()
-    return rows_affected > 0
 
 def can_claim_daily(user_id):
     """Check if user can claim daily reward (24 hours since last claim)"""
@@ -1672,6 +1630,40 @@ def can_claim_daily(user_id):
     except Exception as e:
         print(f"Error parsing timestamp: {e}")
         return True, 0  # Allow claim if there's an error
+
+
+DAILY_COOLDOWN = _datetime.timedelta(hours=24)
+
+
+def claim_daily(user_id, xp):
+    """Pay the daily reward if it is due, in one statement.
+
+    The check (can_claim_daily) and the payout used to be separate calls, so
+    two `.daily`s sent together could both pass the check before either wrote
+    the new claim time, and both pay out. The 24-hour test now sits in the
+    UPDATE's WHERE clause, against the same naive-UTC clock can_claim_daily
+    reads.
+
+    Returns ("claimed", (xp_before, xp_after)), ("wait", seconds_left) or
+    ("unregistered", None).
+    """
+    user_id = _uid(user_id)
+    cutoff = _datetime.datetime.now(_datetime.timezone.utc).replace(tzinfo=None) - DAILY_COOLDOWN
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("""
+        UPDATE users SET xp = COALESCE(xp, 0) + ?, last_daily_claim = CURRENT_TIMESTAMP
+        WHERE id = ? AND (last_daily_claim IS NULL OR last_daily_claim <= ?)
+        RETURNING xp
+    """, (xp, user_id, cutoff))
+    row = next(iter(c.fetchall()), None)
+    conn.commit()
+    conn.close()
+    if row:
+        return "claimed", (row[0] - xp, row[0])
+    if not user_exists(user_id):
+        return "unregistered", None
+    return "wait", can_claim_daily(user_id)[1]
 
 # ===== DROP ECONOMY =====
 
@@ -1821,29 +1813,72 @@ def add_pull_charges(user_id, count=1):
 
 
 # ===== MYTHIC COPY MANAGEMENT FUNCTIONS =====
+#
+# A copy's number lives in collections.copy_number, written once when the copy
+# is claimed; everything below reads that column rather than working the
+# number out from claim order.
 
-def get_mythic_copy_count(song_id):
-    """Get the current number of mythic copies that have been collected for a song"""
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("""
-        SELECT COUNT(*) 
-        FROM collections 
-        WHERE song_id = ? AND variant = 'mythic'
-    """, (song_id,))
-    result = c.fetchone()
-    conn.close()
-    return result[0] if result else 0
+# The number the next copy of a song gets: the lowest one not in use. With no
+# gaps that is simply count + 1. A copy an admin removes frees its number for
+# the next claim, so the numbers stay within 1..cap and never shift -- the old
+# computed numbers renumbered every later copy whenever one was deleted.
+# Binds the song id twice.
+_NEXT_COPY_SQL = """
+    CASE WHEN NOT EXISTS (SELECT 1 FROM collections f
+                          WHERE f.song_id = ? AND f.variant = 'mythic' AND f.copy_number = 1)
+         THEN 1
+         ELSE (SELECT MIN(g.copy_number) + 1 FROM collections g
+               WHERE g.song_id = ? AND g.variant = 'mythic' AND g.copy_number IS NOT NULL
+                 AND NOT EXISTS (SELECT 1 FROM collections h
+                                 WHERE h.song_id = g.song_id AND h.variant = 'mythic'
+                                   AND h.copy_number = g.copy_number + 1))
+    END"""
 
-def get_next_mythic_copy_number(song_id):
-    """Get what the next copy number would be for a mythic song"""
-    return get_mythic_copy_count(song_id) + 1
 
-def can_collect_mythic(song_id, max_copies=None):
-    """Check if a mythic song can still be collected (hasn't reached max copies)"""
+def claim_mythic(user_id, song_id, album_id, max_copies=None):
+    """Put a mythic copy in a collection and number it, in one statement.
+
+    The cap, the one-copy-per-player rule and the number are all settled inside
+    the INSERT, so no check made a moment earlier can go stale before the write.
+    Two claims for one song landing together compute the same number; the
+    unique index refuses the second, which retries and then sees the first.
+
+    Returns ("claimed", copy_number), ("owned", None) or ("full", None).
+    """
     max_copies = odds.MYTHIC_MAX_COPIES if max_copies is None else max_copies
-    current_copies = get_mythic_copy_count(song_id)
-    return current_copies < max_copies
+    user_id = _uid(user_id)
+    conn = get_connection()
+    try:
+        c = conn.cursor()
+        for attempt in range(3):
+            try:
+                c.execute(f"""
+                    INSERT INTO collections (user_id, song_id, album_id, variant, copy_number)
+                    SELECT ?, ?, ?, 'mythic', {_NEXT_COPY_SQL}
+                    WHERE (SELECT COUNT(*) FROM collections
+                           WHERE song_id = ? AND variant = 'mythic') < ?
+                      AND NOT EXISTS (SELECT 1 FROM collections
+                                      WHERE song_id = ? AND variant = 'mythic' AND user_id = ?)
+                    RETURNING copy_number
+                """, (user_id, song_id, album_id, song_id, song_id,
+                      song_id, max_copies, song_id, user_id))
+                # fetchall, not fetchone: SQLite finishes a RETURNING statement
+                # only once it is stepped to the end, and cannot commit before.
+                row = next(iter(c.fetchall()), None)
+                conn.commit()
+                break
+            except Exception as exc:
+                if attempt == 2 or not _is_unique_violation(exc):
+                    raise
+                conn.rollback()
+        if row:
+            return "claimed", row[0]
+        c.execute("SELECT 1 FROM collections WHERE song_id = ? AND variant = 'mythic' AND user_id = ?",
+                  (song_id, user_id))
+        return ("owned" if c.fetchone() else "full"), None
+    finally:
+        conn.close()
+
 
 def get_mythic_pull_state(song_id, user_id, max_copies=None):
     """Everything the pull path needs about one mythic, in a single round trip.
@@ -1858,6 +1893,9 @@ def get_mythic_pull_state(song_id, user_id, max_copies=None):
     still reports one: an aggregate over an empty collections match would
     otherwise give a row of zeroes and no rarity.
 
+    'next_copy_number' is the one claim_mythic would hand out right now, so the
+    reveal shows the number the claim will actually give.
+
     Returns the same keys as get_mythic_copy_info(), plus 'rarity' and
     'user_owns'.
     """
@@ -1866,17 +1904,18 @@ def get_mythic_pull_state(song_id, user_id, max_copies=None):
 
     conn = get_connection()
     c = conn.cursor()
-    c.execute("""
+    c.execute(f"""
         SELECT (SELECT rarity FROM songs WHERE id = ?),
                COUNT(*),
-               COUNT(CASE WHEN user_id = ? THEN 1 END)
+               COUNT(CASE WHEN user_id = ? THEN 1 END),
+               {_NEXT_COPY_SQL}
         FROM collections
         WHERE song_id = ? AND variant = 'mythic'
-    """, (song_id, user_id, song_id))
+    """, (song_id, user_id, song_id, song_id, song_id))
     row = c.fetchone()
     conn.close()
 
-    rarity, current_copies, mine = (row or (None, 0, 0))
+    rarity, current_copies, mine, next_copy = (row or (None, 0, 0, 1))
     current_copies = current_copies or 0
     return {
         'rarity': rarity,
@@ -1884,70 +1923,45 @@ def get_mythic_pull_state(song_id, user_id, max_copies=None):
         'current_copies': current_copies,
         'remaining_copies': max_copies - current_copies,
         'can_collect': current_copies < max_copies,
-        'next_copy_number': current_copies + 1,
+        'next_copy_number': next_copy,
         'user_owns': bool(mine),
     }
 
 
 def get_mythic_copy_info(song_id, max_copies=None):
-    """Get information about mythic copies for a song"""
+    """How many copies of a mythic are out, and the number the next one gets."""
     max_copies = odds.MYTHIC_MAX_COPIES if max_copies is None else max_copies
-    current_copies = get_mythic_copy_count(song_id)
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute(f"""
+        SELECT (SELECT COUNT(*) FROM collections WHERE song_id = ? AND variant = 'mythic'),
+               {_NEXT_COPY_SQL}
+    """, (song_id, song_id, song_id))
+    current_copies, next_copy = c.fetchone()
+    conn.close()
     return {
         'max_copies': max_copies,
         'current_copies': current_copies,
         'remaining_copies': max_copies - current_copies,
         'can_collect': current_copies < max_copies,
-        'next_copy_number': current_copies + 1
+        'next_copy_number': next_copy,
     }
 
-def get_user_mythic_copy_number(user_id, song_id):
-    """Which mythic copy of `song_id` this user holds, or None if they hold none.
-
-    Two things this has to get right:
-      * a non-owner must return None. The old single-query form compared
-        against a NULL timestamp, matched no rows, and reported copy #1 for
-        everyone who owned nothing.
-      * collected_at only has one-second resolution, so two claims in the same
-        second tie. collections.id breaks the tie, giving the same order
-        get_mythic_owners lists them in.
-
-    Both are kept, in one statement: the user's earliest copy is a derived
-    table, so a non-owner produces no row at all, and the count of earlier
-    claims is a subquery against it.
-    """
-    user_id = _uid(user_id)
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("""
-        SELECT 1 + (SELECT COUNT(*) FROM collections earlier
-                    WHERE earlier.song_id = mine.song_id AND earlier.variant = 'mythic'
-                      AND (earlier.collected_at < mine.collected_at
-                           OR (earlier.collected_at = mine.collected_at
-                               AND earlier.id < mine.id)))
-        FROM (SELECT song_id, collected_at, id
-              FROM collections
-              WHERE user_id = ? AND song_id = ? AND variant = 'mythic'
-              ORDER BY collected_at ASC, id ASC
-              LIMIT 1) mine
-    """, (user_id, song_id))
-    row = c.fetchone()
-    conn.close()
-    return row[0] if row else None
 
 def get_mythic_owners(song_id):
-    """Get list of users who own copies of a mythic song, ordered by collection time"""
+    """Who holds each copy of a mythic: [(user_id, collected_at, copy_number)],
+    in copy order."""
     conn = get_connection()
     c = conn.cursor()
     c.execute("""
-        SELECT user_id, collected_at
+        SELECT user_id, collected_at, copy_number
         FROM collections
         WHERE song_id = ? AND variant = 'mythic'
-        ORDER BY collected_at ASC, id ASC
+        ORDER BY copy_number ASC, collected_at ASC, id ASC
     """, (song_id,))
     results = c.fetchall()
     conn.close()
-    return results  # List of (user_id, collected_at)
+    return results
 
 def get_collection_with_copy_numbers(user_id):
     """A user's collection, rarest tier first.
@@ -1966,15 +1980,7 @@ def get_collection_with_copy_numbers(user_id):
             collections.variant, 
             albums.name, 
             albums.image,
-            CASE 
-                WHEN collections.variant = 'mythic' THEN
-                    (SELECT COUNT(*) + 1
-                     FROM collections c2
-                     WHERE c2.song_id = collections.song_id 
-                     AND c2.variant = 'mythic' 
-                     AND c2.collected_at < collections.collected_at)
-                ELSE 1
-            END as copy_number,
+            CASE WHEN collections.variant = 'mythic' THEN collections.copy_number ELSE 1 END,
             songs.rarity,
             collections.id
         FROM collections
@@ -2063,20 +2069,6 @@ def get_available_mythic_songs_for_user(user_id, limit=None, max_copies=None):
     conn.close()
     return results  # List of (song_id, song_name, artist_name)
 
-def user_owns_mythic(user_id, song_id):
-    """Check if a user already owns a mythic copy of a specific song"""
-    user_id = _uid(user_id)
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("""
-        SELECT COUNT(*) 
-        FROM collections 
-        WHERE user_id = ? AND song_id = ? AND variant = 'mythic'
-    """, (user_id, song_id))
-    result = c.fetchone()
-    conn.close()
-    return result[0] > 0 if result else False
-
 # ===== VINYL TRACKING FUNCTIONS =====
 
 def add_vinyl_count(user_id, count=1):
@@ -2093,6 +2085,18 @@ def add_vinyl_count(user_id, count=1):
     """, (count, user_id))
     conn.commit()
     conn.close()
+
+def get_vinyl_counts(user_id):
+    """(vinyl_count, sig_vinyl_count) in one read, or None if not registered."""
+    user_id = _uid(user_id)
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("SELECT COALESCE(vinyl_count, 0), COALESCE(sig_vinyl_count, 0) FROM users WHERE id = ?",
+              (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return tuple(row) if row else None
+
 
 def get_vinyl_count(user_id):
     """Get a user's available vinyl pull count"""
@@ -2368,6 +2372,28 @@ def clear_mythic_hunt():
     conn.close()
 
 
+def take_mythic_hunt():
+    """Read and clear the hunt in one statement, for the pull it goes to.
+
+    The pull used to read the hunt and then clear it as two calls, so two
+    mythic pulls landing together could both read it and both be handed the
+    hunted song. Deleting the row reads it at the same time; get_mythic_hunt
+    treats a missing row exactly like a cleared one.
+    """
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("""
+        DELETE FROM mythic_state WHERE id = 1 AND song_id IS NOT NULL
+        RETURNING song_id, song_name, album_id, album_name, album_url, artist
+    """)
+    row = next(iter(c.fetchall()), None)
+    conn.commit()
+    conn.close()
+    if not row:
+        return None
+    return dict(zip(("song_id", "song_name", "album_id", "album_name", "album_url", "artist"), row))
+
+
 # ---------------------------------------------------------------------------
 # Card / profile queries
 #
@@ -2392,7 +2418,7 @@ _RARITY_RANK_SQL = """
 _CARD_COLUMNS = """
     collections.id, collections.user_id, songs.id, songs.name, songs.artist,
     songs.rarity, collections.variant, albums.id, albums.name, albums.image,
-    collections.collected_at
+    collections.collected_at, collections.copy_number
 """
 
 
@@ -2412,6 +2438,8 @@ def _card_dict(row):
         "album_name": row[8],
         "album_image": row[9],
         "collected_at": row[10],
+        # Stored on the row since the column was added; None unless mythic.
+        "copy_number": row[11],
     }
 
 
@@ -2494,36 +2522,24 @@ def search_user_cards(user_id, query="", variant=None, limit=25, artist=None):
     return [_card_dict(r) for r in rows]
 
 
-def count_card_owners(song_id, variant=None):
-    """How many copies of this song are held across all players."""
-    conn = get_connection()
-    c = conn.cursor()
-    if variant:
-        c.execute("SELECT COUNT(*) FROM collections WHERE song_id = ? AND variant = ?",
-                  (song_id, variant))
-    else:
-        c.execute("SELECT COUNT(*) FROM collections WHERE song_id = ?", (song_id,))
-    row = c.fetchone()
-    conn.close()
-    return row[0] if row else 0
+def get_card_screen_stats(collection_id, song_id, owner_id=None):
+    """(owners, pinned) for one card screen, in a single query.
 
-
-def get_card_copy_number(collection_id):
-    """Which mythic copy this row is, by claim order. None for other variants."""
+    owners counts every copy of the song, and pinned says whether this is the
+    owner's pinned card. The copy number used to be worked out here too; it
+    now rides on the card itself (see _card_dict). `pinned` is None when
+    owner_id is not given, for callers that already know.
+    """
     conn = get_connection()
     c = conn.cursor()
     c.execute("""
-        SELECT (SELECT COUNT(*) + 1
-                FROM collections c2
-                WHERE c2.song_id = c1.song_id
-                  AND c2.variant = 'mythic'
-                  AND c2.collected_at < c1.collected_at)
-        FROM collections c1
-        WHERE c1.id = ? AND c1.variant = 'mythic'
-    """, (collection_id,))
-    row = c.fetchone()
+        SELECT (SELECT COUNT(*) FROM collections WHERE song_id = ?),
+               (SELECT pinned_collection_id FROM users WHERE id = ?)
+    """, (song_id, _uid(owner_id) if owner_id is not None else None))
+    owners, pinned_id = c.fetchone()
     conn.close()
-    return row[0] if row else None
+    pinned = None if owner_id is None else (pinned_id is not None and pinned_id == collection_id)
+    return owners or 0, pinned
 
 
 # ---- profile --------------------------------------------------------------

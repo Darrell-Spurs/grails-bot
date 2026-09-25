@@ -1,9 +1,7 @@
-import asyncio
-
 from flask import Blueprint, render_template, request, redirect, url_for, flash, jsonify
 
 import db
-from utils.helpers import add_artist_to_db
+from utils import artist_import
 
 catalog_bp = Blueprint("catalog", __name__, url_prefix="/catalog")
 
@@ -39,30 +37,56 @@ def artists():
         # An empty catalog and a search that matched nothing need different
         # empty states, so the template needs to tell them apart.
         catalog_empty=not db.get_all_artists(),
+        imports=[job.snapshot() for job in artist_import.active_jobs()],
     )
 
 
 @catalog_bp.post("/artists/add")
 def add_artist():
+    """Start an import and go straight to its progress page.
+
+    The import used to run inside this request, so the browser spun for the
+    whole import and a long one could time out and look failed even when it
+    worked. It is a background job now (utils/artist_import.py), shared with
+    the bot's `.addartist`; asking for an artist already being imported
+    lands on that import instead of starting a second.
+    """
     artist_name = request.form.get("artist_name", "").strip()
     if not artist_name:
         flash("Artist name is required.", "error")
         return redirect(url_for("catalog.artists"))
 
-    async def _import_artist():
-        album_details = await add_artist_to_db(artist_name, "album")
-        single_details = await add_artist_to_db(album_details["artist_name"], "single")
-        return album_details, single_details
+    job, started = artist_import.start_import(artist_name, requested_by="web panel", source="web")
+    if not started:
+        flash(f"{job.query} is already being imported — here is that import.", "warning")
+    return redirect(url_for("catalog.import_status", job_id=job.id))
 
-    album_details, single_details = asyncio.run(_import_artist())
-    corrected_name = album_details["artist_name"]
-    flash(
-        f"Imported {corrected_name}: "
-        f"{album_details['albums_saved']} albums / {album_details['songs_saved']} songs, "
-        f"{single_details['albums_saved']} singles / {single_details['songs_saved']} songs.",
-        "success",
-    )
-    return redirect(url_for("catalog.artist_detail", artist=corrected_name))
+
+def _progress(job):
+    """A job snapshot plus the numbers and links the page renders."""
+    snap = job.snapshot()
+    snap["percent"] = artist_import.percent(snap)
+    snap["artist_url"] = (url_for("catalog.artist_detail", artist=snap["artist"])
+                          if snap["phase"] == "done" and snap["artist"] else None)
+    return snap
+
+
+@catalog_bp.get("/imports/<job_id>")
+def import_status(job_id):
+    job = artist_import.get_job(job_id)
+    if job is None:
+        flash("That import is no longer available — finished imports are kept for an hour.", "error")
+        return redirect(url_for("catalog.artists"))
+    return render_template("catalog_import.html", job=_progress(job))
+
+
+@catalog_bp.get("/imports/<job_id>/progress")
+def import_progress(job_id):
+    """What the import page polls while the job runs."""
+    job = artist_import.get_job(job_id)
+    if job is None:
+        return jsonify(error="unknown import"), 404
+    return jsonify(_progress(job))
 
 
 @catalog_bp.get("/artists/<artist>")

@@ -1,3 +1,4 @@
+import asyncio
 import sys, os
 
 sys.path.insert(0,
@@ -5,7 +6,44 @@ sys.path.insert(0,
 
 import discord
 from discord.ext import commands
-from db import get_songs_by_artist_and_album_category, get_album_category, get_all_artists, get_song_by_artist, get_song_rarity
+from db import (find_artist, get_album_category, get_song_by_artist,
+                get_songs_by_artist_and_album_category)
+from utils.aesthetics import RARITY_ORDER
+
+
+def _song_lines(rows):
+    """Numbered `name | rarity` lines, *N/A* for a song with no real tier yet.
+
+    The rarity arrives as the rows' fifth column; this used to look it up with
+    one get_song_rarity() query per song -- twenty round trips for an album.
+    """
+    return [f"{i}. {name} | {rarity if rarity in RARITY_ORDER else '*N/A*'}"
+            for i, (_, name, _, _, rarity) in enumerate(rows, 1)]
+
+
+def _add_song_fields(embed, lines, continued):
+    """Add `lines` as a Songs field, split into 20-line fields past Discord's
+    1024-character cap. `continued(n)` names the n-th extra field; singles and
+    albums have always labelled theirs differently, so each caller says how.
+    """
+    text = "\n".join(lines)
+    if len(text) <= 1024:
+        embed.add_field(name="Songs", value=text, inline=False)
+        return
+    for n, start in enumerate(range(0, len(lines), 20)):
+        embed.add_field(name="Songs" if n == 0 else continued(n),
+                        value="\n".join(lines[start:start + 20]), inline=False)
+
+
+def _load_listing(artist_name, album_name):
+    """(artist, rows, total_songs) for `.list`; artist is None when unknown.
+    total_songs is only counted for the albums overview, which shows it."""
+    artist = find_artist(artist_name)
+    if not artist:
+        return None, None, None
+    rows = get_songs_by_artist_and_album_category(artist, album_name)
+    total = len(get_song_by_artist(artist)) if rows and not album_name else None
+    return artist, rows, total
 
 
 class ListCog(commands.Cog):
@@ -13,11 +51,11 @@ class ListCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    def _create_active_list(self, results, list_type="songs"):
+    def _create_active_list(self, results):
         """Create an active list from results for use with assign command"""
         active_list = []
         for i, result in enumerate(results):
-            song_id, song_name, album_name, track_count = result
+            song_id, song_name, album_name, track_count = result[:4]
             # Extract artist from the first result (assuming all results are from same artist)
             active_list.append({
                 'id': song_id,
@@ -67,33 +105,15 @@ class ListCog(commands.Cog):
             artist_name = args.strip()
             album_name = None
 
-        # Check if artist exists in database
-        all_artists = get_all_artists()
-        artist_found = None
-        for artist in all_artists:
-            if artist.lower() == artist_name.lower():
-                artist_found = artist
-                break
+        # Artist, songs and (for the overview) the song total, in one hop
+        artist_found, results, total_songs = await asyncio.to_thread(
+            _load_listing, artist_name, album_name)
 
         if not artist_found:
             await ctx.send(
                 f"❌ **Artist not found!**\n"
                 f"Could not find artist `{artist_name}` in the database.")
             return
-
-        # Get songs based on parameters
-        results = get_songs_by_artist_and_album_category(
-            artist_found, album_name)
-
-        # Get total song count for the artist (for display purposes)
-        if album_name:
-            # For specific album or singles, use the current results count
-            total_songs = len(results)
-        else:
-            # For albums/EPs listing, get all songs by the artist
-            all_artist_songs = get_songs_by_artist_and_album_category(
-                artist_found, None)
-            total_songs = len(all_artist_songs)
 
         if not results:
             if album_name == "singles":
@@ -120,33 +140,11 @@ class ListCog(commands.Cog):
                 description="Songs from albums with 3 or fewer tracks:",
                 color=discord.Color.green())
 
-            song_list = []
-            for i, (song_id, song_name, album_name_result,
-                    track_count) in enumerate(results):
-                rarity = get_song_rarity(song_id)
-                if rarity in ["basic", "unique", "elite", "legendary", "ultimate"]:
-                    song_list.append(f"{i+1}. {song_name} | {rarity}")
-                else:
-                    song_list.append(f"{i+1}. {song_name} | *N/A*")
-
-            # Split into chunks if too many songs
-            song_text = "\n".join(song_list)
-            if len(song_text) > 1024:
-                # Split into multiple fields if too long
-                chunks = [
-                    song_list[i:i + 20] for i in range(0, len(song_list), 20)
-                ]
-                for i, chunk in enumerate(chunks):
-                    field_name = "Songs" if i == 0 else f"Songs (continued)"
-                    embed.add_field(name=field_name,
-                                    value="\n".join(chunk),
-                                    inline=False)
-            else:
-                embed.add_field(name="Songs", value=song_text, inline=False)
+            _add_song_fields(embed, _song_lines(results),
+                             continued=lambda n: "Songs (continued)")
 
         elif album_name:
             # Show songs from specific album
-            song_list = []
             track_count = results[0][3] if results else 0
             category = get_album_category(track_count)
 
@@ -155,33 +153,9 @@ class ListCog(commands.Cog):
                 description=f"{category} • {track_count} tracks",
                 color=discord.Color.blue())
 
-            for i, (song_id, song_name, _, _) in enumerate(results):
-                rarity = get_song_rarity(song_id)
-                if rarity in ["basic", "unique", "elite", "legendary", "ultimate"]:
-                    song_list.append(f"{i+1}. {song_name} | {rarity}")
-                else:
-                    song_list.append(f"{i+1}. {song_name} | *N/A*")
-
-            # Split into chunks if too many songs
-            song_text = "\n".join(song_list)
-            print("LENGTH", len(song_text))
-            print(song_text)
-            if len(song_text) > 1024:
-                # Split into multiple fields if too long
-                chunks = [
-                    song_list[i:i + 20] for i in range(0, len(song_list), 20)
-                ]
-                for i, chunk in enumerate(chunks):
-                    field_name = "Songs" if i == 0 else f"Songs (continued {i+1})"
-                    embed.add_field(name=field_name,
-                                    value="\n".join(chunk),
-                                    inline=False)
-            else:
-                embed.add_field(name="Songs", value=song_text, inline=False)
+            _add_song_fields(embed, _song_lines(results),
+                             continued=lambda n: f"Songs (continued {n+1})")
         else:
-            total_songs = len(get_song_by_artist(artist_found))
-            print(f"Total songs by {artist_found}: {total_songs}")
-
             # Show only albums and EPs (no singles, no individual songs)
             albums_dict = {}
             for song_name, album_name_result, track_count in results:
@@ -245,7 +219,7 @@ class ListCog(commands.Cog):
         )
 
         # Create and set active list for assign command (only for singles and specific album)
-        if album_name == "singles" or (album_name and album_name != "singles"):
+        if album_name:
             active_list = self._create_active_list(results)
             # Set artist for all items in the list
             for item in active_list:
@@ -258,21 +232,6 @@ class ListCog(commands.Cog):
                 embed.description += f"\n\n*Use `.assign <number> <rarity>` to assign rarities (1-{len(active_list)})*"
 
         await ctx.send(embed=embed)
-
-    @list.error
-    async def list_error(self, ctx, error):
-        if isinstance(error, commands.MissingRole):
-            await ctx.send(
-                "❌ You need the 'grails-admin' role to use this command!")
-        elif isinstance(error, commands.MissingRequiredArgument):
-            await ctx.send(
-                "❌ **Missing arguments!**\n"
-                "**Usage:** `.list <artist_name> / <album_name>`\n"
-                "**Special:** `.list <artist_name> / singles` (for singles only)\n"
-                "**List all:** `.list <artist_name>` (lists all albums/EPs)")
-        else:
-            raise error
-
 
 async def setup(bot):
     await bot.add_cog(ListCog(bot))
