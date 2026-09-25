@@ -56,7 +56,7 @@ def build_card_embed(card, owner_name, copy_number=None, owners=None, pinned=Fal
 
     title = f"{card_emoji(rarity, variant)} {card['song_name']}"
     if variant == "mythic" and copy_number:
-        title += f"  ·  #{copy_number}"
+        title = f"{card_emoji(rarity, variant)} #{copy_number}  {card['song_name']}"
 
     embed = discord.Embed(title=title, colour=rarity_colour(rarity))
     # set_author rejects icon_url=None, but is happy for it to be absent.
@@ -135,9 +135,9 @@ def _card_line(index, card):
 
     copy_tag = ""
     if variant == "mythic" and card.get("copy_number"):
-        copy_tag = f" #{card['copy_number']}"
+        copy_tag = f"#{card['copy_number']}"
     return (f"`{index:>2}` {card_emoji(rarity, variant)} "
-            f"**{card['song_name']}** by **{card['artist']}**{copy_tag}")
+            f"**{copy_tag} {card['song_name']}** by **{card['artist']}**")
 
 
 def build_collection_embed(cards, page, pages, total, owner_name, *, variant=None,
