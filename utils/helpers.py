@@ -1,11 +1,10 @@
 import cv2
 
 import sys, os, random
-from PIL import Image, ImageDraw, ImageFont, ImageEnhance
+from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageChops
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 import numpy as np
-import colorsys
 
 # Add the project root to the Python path for db import
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -153,21 +152,35 @@ def draw_variant():
     return "default"
 
 def create_glitched_effect(image):
-    shift = -0.1
     img = image.convert("RGB")
-    arr = np.array(img) / 255.0
-    r, g, b = arr[..., 0], arr[..., 1], arr[..., 2]
+    width, height = img.size
 
-    # Convert to HSV
-    h, s, v = np.vectorize(colorsys.rgb_to_hsv)(r, g, b)
+    r, g, b = img.split()
+    result = Image.merge("RGB", (
+        ImageChops.offset(r, round(width * 7 / 450), 0),
+        g,
+        ImageChops.offset(b, -round(width * 6 / 450), 0),
+    ))
 
-    # Shift hue
-    h = (h + shift) % 1.0
+    # Position, height, and sideways shift of each glitch band
+    bands = [
+        (174, 19, 8), (205, 10, -7), (258, 22, 17),
+        (281, 14, -10), (347, 12, 8), (402, 9, -7),
+    ]
 
-    # Convert back to RGB
-    r, g, b = np.vectorize(colorsys.hsv_to_rgb)(h, s, v)
-    shifted_arr = np.stack([r, g, b], axis=-1) * 255
-    return Image.fromarray(shifted_arr.astype("uint8"))
+    for y, band_height, displacement in bands:
+        top = round(y * height / 450)
+        bottom = min(height, top + max(1, round(band_height * height / 450)))
+        if top >= height:
+            continue
+
+        band = result.crop((0, top, width, bottom))
+        band = ImageChops.offset(
+            band, round(displacement * width / 450), 0
+        )
+        result.paste(band, (0, top))
+
+    return ImageEnhance.Color(result).enhance(1.15)
 
 def create_sketch_effect(img_input):
     img = cv2.cvtColor(np.array(img_input), cv2.COLOR_RGB2BGR)

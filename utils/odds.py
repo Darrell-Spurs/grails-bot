@@ -28,6 +28,7 @@ SONGS_PER_PULL = 3
 # MYTHIC_PER_PULL = 1        # testing only: every pull is a mythic
 MYTHIC_PER_PULL = 0.005      # 0.5%
 GUTSCOOKIE_PER_PULL = 0.02   # 2%
+# SKETCH_PER_PULL = 1   # 3%
 SKETCH_PER_PULL = 0.03       # 3%
 GLITCHED_PER_PULL = 0.12     # 12%
 
