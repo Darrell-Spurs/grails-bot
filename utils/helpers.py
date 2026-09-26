@@ -198,6 +198,7 @@ def create_sketch_effect(img_input):
     pil_img = Image.fromarray(sketch)
     pil_img = ImageEnhance.Contrast(pil_img).enhance(3)   # More fill and pop
     pil_img = ImageEnhance.Sharpness(pil_img).enhance(3)  # Clearer edges
+    pil_ima = ImageEnhance.Contrast(pil_img).enhance(1.5)  # Slightly more contrast for pop
     # fixed_size = (300, 300)
     # pil_img = pil_img.resize(fixed_size, Image.ANTIALIAS)
 
