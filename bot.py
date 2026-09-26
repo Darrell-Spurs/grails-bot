@@ -197,24 +197,42 @@ if not BOT_TOKEN:
         "environment variable on your host."
     )
 
-# The admin panel is a local tool by default: it binds loopback so it isn't
-# reachable from the network. Set ENABLE_WEB_PANEL=0 on a remote host to skip it
-# entirely, or WEB_HOST=0.0.0.0 if you deliberately want it exposed.
+# The admin panel binds loopback by default, so it is not reachable from the
+# network. To put it online, set WEB_HOST=0.0.0.0. The port is PORT if set,
+# else SERVER_PORT -- which Pterodactyl hosts (Cybrancee included) set to the
+# port they assign the server -- else 8080. ENABLE_WEB_PANEL=0 skips it.
 ENABLE_WEB_PANEL = os.environ.get("ENABLE_WEB_PANEL", "1").lower() not in ("0", "false", "no")
 WEB_HOST = os.environ.get("WEB_HOST", "127.0.0.1")
-WEB_PORT = int(os.environ.get("PORT", 8080))
+WEB_PORT = int(os.environ.get("PORT") or os.environ.get("SERVER_PORT") or 8080)
 
 
 def start_web_panel():
     from web.app import create_app
     app = create_app(bot)
-    app.run(host=WEB_HOST, port=WEB_PORT, threaded=True, use_reloader=False)
+    try:
+        from waitress import serve
+    except ImportError:
+        # waitress is in requirements.txt; this only keeps a machine that has
+        # not installed it yet working, on Flask's development server.
+        log.warning("waitress is not installed; the admin panel is using Flask's "
+                    "development server, which is not meant to be exposed")
+        app.run(host=WEB_HOST, port=WEB_PORT, threaded=True, use_reloader=False)
+        return
+    # A production server. Flask's built-in one says outright that it is not
+    # for anything reachable from the internet.
+    serve(app, host=WEB_HOST, port=WEB_PORT, threads=4)
 
 
 async def main():
     if ENABLE_WEB_PANEL:
         threading.Thread(target=start_web_panel, daemon=True).start()
-        log.info("Web admin panel on http://%s:%s", WEB_HOST, WEB_PORT)
+        if WEB_HOST in ("127.0.0.1", "localhost"):
+            log.info("Web admin panel on http://%s:%s (this machine only)", WEB_HOST, WEB_PORT)
+        else:
+            log.info("Web admin panel online on port %s -- open http://<this server's address>:%s",
+                     WEB_PORT, WEB_PORT)
+        if not os.environ.get("ADMIN_PASSWORD"):
+            log.warning("ADMIN_PASSWORD is not set, so nobody can log in to the admin panel")
     else:
         log.info("Web admin panel disabled (ENABLE_WEB_PANEL=0)")
 

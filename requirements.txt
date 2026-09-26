@@ -15,6 +15,8 @@ opencv-python-headless>=4.9.0,<5
 
 # Admin panel (local tool by default; see ENABLE_WEB_PANEL in bot.py)
 Flask>=3.0.0
+# Serves the panel when it is online: Flask's built-in server is not for that.
+waitress>=3.0.0
 
 # Postgres backend, used when DATABASE_URL is set (e.g. Supabase).
 # Not needed for local SQLite runs, but harmless to install.

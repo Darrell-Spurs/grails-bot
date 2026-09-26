@@ -81,6 +81,17 @@ def create_app(bot=None):
     app.register_blueprint(mythic_bp)
     app.register_blueprint(odds_bp)
 
+    @app.after_request
+    def security_headers(response):
+        # Cheap hardening now that the panel can be reachable from the
+        # internet: it cannot be framed by another site (clickjacking), the
+        # browser does not guess content types, and full panel URLs are not
+        # sent to the image and font hosts the pages load from.
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("Referrer-Policy", "same-origin")
+        return response
+
     @app.before_request
     def require_login():
         if request.endpoint in PUBLIC_ENDPOINTS or request.endpoint is None:
