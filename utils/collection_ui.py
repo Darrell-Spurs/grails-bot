@@ -259,15 +259,21 @@ class _OwnerView(DisableOnTimeoutView):
     @discord.ui.button(label="Back to profile",
                        style=discord.ButtonStyle.secondary, row=0)
     async def back_to_profile(self, interaction, button):
-        # `back_to` is async: rebuilding the profile reads the database.
+        # Rebuilding the profile reads the database and draws the pinned card,
+        # which can outlast Discord's 3-second window, so the click is
+        # acknowledged first and the message edited once the profile is ready.
+        await interaction.response.defer()
         rebuilt = await self.back_to() if self.back_to else None
         if rebuilt is None:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "That profile is no longer available.", ephemeral=True)
             return
-        embed, view = rebuilt
+        embed, view, art = rebuilt
         view.message = self.message
-        await interaction.response.edit_message(embed=embed, view=view)
+        # `attachments` replaces the previous screen's upload: the pinned
+        # card's art when it has one, nothing at all when it is a plain cover.
+        await interaction.edit_original_response(
+            embed=embed, view=view, attachments=[art] if art else [])
 
 
 class TradePartnerSelect(discord.ui.UserSelect):
@@ -354,7 +360,9 @@ class CardView(_OwnerView):
         view = self.origin
         view.invoker_id = self.invoker_id
         view.message = self.message
-        await interaction.response.edit_message(embed=view.render(), view=view)
+        # attachments=[] drops this card's art, which would otherwise stay on
+        # the message above the collection list.
+        await interaction.response.edit_message(embed=view.render(), view=view, attachments=[])
 
     @discord.ui.button(label="Trade this", style=discord.ButtonStyle.primary, row=0)
     async def trade_this(self, interaction, button):
@@ -394,7 +402,7 @@ class CardView(_OwnerView):
             artist=self.card["artist"],
         )
         view.message = self.message
-        await interaction.response.edit_message(embed=view.render(), view=view)
+        await interaction.response.edit_message(embed=view.render(), view=view, attachments=[])
 
 
 class CollectionView(_OwnerView):

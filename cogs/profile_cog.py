@@ -13,6 +13,7 @@ from discord.ext import commands
 
 import db
 from utils.aesthetics import card_emoji
+from utils.card_art import ART_FILENAME, card_art_file
 from utils.collection_ui import (
     CardView, CollectionView, DisableOnTimeoutView, rarity_colour, render_card,
 )
@@ -83,7 +84,9 @@ class ProfileView(DisableOnTimeoutView):
         if not view.total:
             await interaction.response.send_message("That collection is empty.", ephemeral=True)
             return
-        await interaction.response.edit_message(embed=view.render(), view=view)
+        # attachments=[] drops the pinned card's art, which would otherwise
+        # linger on the message above the collection list.
+        await interaction.response.edit_message(embed=view.render(), view=view, attachments=[])
 
     @discord.ui.button(label="Set favorite artist", emoji="❤",
                        style=discord.ButtonStyle.secondary, row=0)
@@ -131,18 +134,26 @@ class ProfileCog(commands.Cog):
         return 0, 0, max(xp, 1)
 
     async def _build_profile(self, owner_id, owner_name, avatar_url):
-        """Build the profile embed, or None when the user is not registered.
+        """Build the profile: (embed, pinned card, art file or None), or None
+        when the user is not registered.
 
         Pulled out of the command so the Back buttons on the collection and
         the pinned card can rebuild the exact same view. Returning it rather
         than sending means one definition serves the first render and every
-        return trip. The reads happen in a worker thread; the embed is built
-        back on the event loop.
+        return trip. The reads and the drawing happen in worker threads; the
+        embed is built back on the event loop.
+
+        The pinned card is drawn the way /view draws it -- a mythic's glow and
+        copy number, a vinyl, a glitch or a sketch -- by the same card_art code.
+        A plain card has no art of its own and keeps the Spotify cover.
         """
         loaded = await asyncio.to_thread(self._load_profile, owner_id)
         if loaded is None:
             return None
-        return self._profile_embed(*loaded, owner_name, avatar_url)
+        data, pinned, completion = loaded
+        art = await asyncio.to_thread(card_art_file, pinned) if pinned else None
+        embed = self._profile_embed(data, pinned, completion, owner_name, avatar_url, art)
+        return embed, pinned, art
 
     @staticmethod
     def _load_profile(owner_id):
@@ -165,7 +176,7 @@ class ProfileCog(commands.Cog):
             completion = db.get_artist_completion(owner_id, data["favorite_artist"])
         return data, pinned, completion
 
-    def _profile_embed(self, data, pinned, completion, owner_name, avatar_url):
+    def _profile_embed(self, data, pinned, completion, owner_name, avatar_url, art=None):
         level, floor, ceiling = self._level(data["xp"])
         into = data["xp"] - floor
         span = max(ceiling - floor, 1)
@@ -184,7 +195,9 @@ class ProfileCog(commands.Cog):
                     extra = f" #{copy_no}"   # matches how a collection row shows the copy
             embed.description = (f"\U0001F4CC {card_emoji(pinned['rarity'], variant)} "
                                  f"**{pinned['song_name']}**{extra} — {pinned['artist']}")
-            if pinned.get("album_image"):
+            if art:
+                embed.set_image(url=f"attachment://{ART_FILENAME}")
+            elif pinned.get("album_image"):
                 embed.set_image(url=pinned["album_image"])
         else:
             embed.description = ("\U0001F4CC Nothing pinned — open a card and "
@@ -217,7 +230,7 @@ class ProfileCog(commands.Cog):
         if data["collecting_since"]:
             embed.set_footer(text=f"Collecting since {str(data['collecting_since'])[:10]}")
 
-        return embed, pinned
+        return embed
 
     @commands.hybrid_command(
         name="profile",
@@ -227,28 +240,35 @@ class ProfileCog(commands.Cog):
     @app_commands.describe(user="Whose profile to show (defaults to you)")
     async def profile(self, ctx, user: Optional[discord.User] = None):
         owner = user or ctx.author
+        # Drawing the pinned card (downloading its cover, rendering a mythic
+        # or vinyl) can take longer than the 3 seconds Discord allows before a
+        # reply, so the command is acknowledged first.
+        await ctx.defer()
         built = await self._build_profile(owner.id, owner.display_name,
                                           owner.display_avatar.url)
         if built is None:
             who = "You are" if owner.id == ctx.author.id else f"{owner.display_name} is"
             await ctx.send(f"{who} not registered yet — run `.register` to start collecting.")
             return
-        embed, pinned = built
+        embed, pinned, art = built
         async def reopen():
-            """Rebuild the profile view for a Back button."""
+            """Rebuild the profile for a Back button: (embed, view, art)."""
             fresh = await self._build_profile(owner.id, owner.display_name,
                                               owner.display_avatar.url)
             if fresh is None:
                 return None
-            new_embed, new_pinned = fresh
+            new_embed, new_pinned, new_art = fresh
             back = ProfileView(ctx.author.id, owner.id, owner.display_name,
                                new_pinned, reopen=reopen,
                                owner_icon=owner.display_avatar.url)
-            return new_embed, back
+            return new_embed, back, new_art
 
         view = ProfileView(ctx.author.id, owner.id, owner.display_name, pinned,
                            reopen=reopen, owner_icon=owner.display_avatar.url)
-        view.message = await ctx.send(embed=embed, view=view)
+        kwargs = {"embed": embed, "view": view}
+        if art:
+            kwargs["file"] = art
+        view.message = await ctx.send(**kwargs)
 
 
 async def setup(bot):

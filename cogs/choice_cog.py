@@ -21,6 +21,7 @@ from utils import economy, odds
 from utils import aesthetics
 from utils.logsetup import event
 
+CHOICE_COMMAND_COOLDOWN = 10  # seconds, matching the pull regen rate in utils/economy.py
 log = logging.getLogger("grails.choice")
 
 rarity_multiplier = odds.RARITY_XP_MULTIPLIER
@@ -291,7 +292,7 @@ class ChoiceCog(commands.Cog):
             await xp_cog.announce_level_ups(xp_changes, ctx.channel, {ctx.author.id: ctx.author})
 
     @commands.command(name="choice", aliases=["c"], description="Get 3 random songs to choose from")
-    @commands.cooldown(rate=1, per=3, type=commands.BucketType.user)
+    @commands.cooldown(rate=1, per=CHOICE_COMMAND_COOLDOWN, type=commands.BucketType.user)
     async def choice(self, ctx):
         """Pull a drop & pick a song
 
