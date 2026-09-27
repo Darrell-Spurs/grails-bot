@@ -20,8 +20,8 @@ import time
 # One charge every three minutes, twenty in the bank. Sixty minutes to refill
 # from empty, so a player who leaves for an hour comes back to a full stack and
 # a player who is present all evening is never actually stopped.
-PULL_REGEN_SECONDS = 180
-PULL_CAP = 5
+PULL_REGEN_SECONDS = 240
+PULL_CAP = 10
 
 # What one `.c` costs.
 PULL_COST = 1
@@ -120,7 +120,7 @@ def discord_countdown(seconds, style="R"):
     return f"<t:{moment}:{style}>"
 
 
-def charge_bar(charges, width=20):
+def charge_bar(charges, width=PULL_CAP):
     """A filled/empty bar. Width matches the cap so one block is one charge."""
     filled = max(0, min(int(charges), PULL_CAP))
     scaled = round(filled / PULL_CAP * width)
