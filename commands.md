@@ -28,7 +28,7 @@ a row, and `/` would slow that down.
 | `.vinyl` | `.v` | prefix only | Opens a vinyl. 10% chance it rolls up to signature odds |
 | `/cooldown` | `.cooldown`, `.cd` | hybrid | Drop charges, with live countdowns to the next one and to full |
 
-You bank one drop every **3 minutes**, up to **20**.
+You bank one drop every **3 minutes**, up to **5**.
 
 ## 2 · Trading
 

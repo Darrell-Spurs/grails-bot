@@ -21,7 +21,7 @@ import time
 # from empty, so a player who leaves for an hour comes back to a full stack and
 # a player who is present all evening is never actually stopped.
 PULL_REGEN_SECONDS = 180
-PULL_CAP = 20
+PULL_CAP = 5
 
 # What one `.c` costs.
 PULL_COST = 1
