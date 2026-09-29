@@ -21,7 +21,7 @@ from utils import economy, odds
 from utils import aesthetics
 from utils.logsetup import event
 
-CHOICE_COMMAND_COOLDOWN = 10  # seconds, matching the pull regen rate in utils/economy.py
+CHOICE_COMMAND_COOLDOWN = 7  # seconds, matching the pull regen rate in utils/economy.py
 log = logging.getLogger("grails.choice")
 
 rarity_multiplier = odds.RARITY_XP_MULTIPLIER
@@ -322,6 +322,36 @@ class ChoiceCog(commands.Cog):
             event(log, "drop refunded", "%s   after a failed pull", ctx.author.name)
             raise
 
+        # Emptying the stack rolls for a Pink Baja Blast, at odds scaled by how
+        # many drops the run down to zero took.
+        if status and status.get("emptied_after"):
+            await self._maybe_baja_blast(ctx, status["emptied_after"])
+
+    async def _maybe_baja_blast(self, ctx, run):
+        """Running the stack down to empty may bring a Pink Baja Blast, which
+        refills it to BAJA_BLAST_REFILL. The chance is BAJA_BLAST_ODDS_PER_DROP
+        for each drop in the run, so 10 -> 0 is 5% and 3 -> 0 is 1.5%: every
+        drop is worth the same, and spamming 1 -> 0 as drops recharge earns
+        nothing extra. Odds live in utils/odds.py."""
+        if random.random() >= min(1.0, odds.BAJA_BLAST_ODDS_PER_DROP * run):
+            return
+        await asyncio.to_thread(db.add_pull_charges, ctx.author.id, odds.BAJA_BLAST_REFILL)
+        event(log, "baja blast", "%s   after a run of %d, drops refilled to %d",
+              ctx.author.name, run, odds.BAJA_BLAST_REFILL)
+
+        embed = discord.Embed(
+            title="Olivia has gifted you a Pink Baja Blast!",
+            description="Your drops seem pretty refilled, use `.cd` to check!",
+            color=discord.Color.from_rgb(255, 105, 180),
+        )
+        image = os.path.join(IMAGES_DIR, "pink_baja_blast.png")
+        if os.path.exists(image):
+            embed.set_image(url="attachment://pink_baja_blast.png")
+            await ctx.send(embed=embed, file=discord.File(image, filename="pink_baja_blast.png"))
+        else:
+            # The art is added separately; the refill still happens without it.
+            await ctx.send(embed=embed)
+
     def _no_charges_embed(self, ctx, status):
         """Shown when the stack is empty -- with the wait, not just a refusal."""
         wait = economy.discord_countdown(status["next_in"]) if status else "in a few minutes"
@@ -365,7 +395,7 @@ class ChoiceCog(commands.Cog):
               picked_ms)
 
         if "gutscookie" in variants and "mythic" not in variants:
-            gutscookie_xp = odds.SOUR_PATCH_GUTSCOOKIE_XP
+            gutscookie_xp = odds.GUTSCOOKIE_XP
             cookie_path = os.path.join(IMAGES_DIR, "gutscookie.png")
             file = discord.File(cookie_path, filename="gutscookie.png")
             embed = discord.Embed(

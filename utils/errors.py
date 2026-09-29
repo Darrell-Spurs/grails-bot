@@ -28,6 +28,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from utils.command_types import NotRegistered, PrefixNotAllowed, SlashNotAllowed
+from utils.economy import discord_countdown
 
 log = logging.getLogger("grails.errors")
 
@@ -53,8 +54,6 @@ def _reply_for(ctx, error):
     if isinstance(error, commands.MissingAnyRole):
         roles = ", ".join(f"'{r}'" for r in error.missing_roles)
         return f"❌ You need one of these roles to use this command: {roles}"
-    if isinstance(error, commands.CommandOnCooldown):
-        return f"⏳ Cool down! Try again in {round(error.retry_after)}s."
     if isinstance(error, (commands.MissingRequiredArgument, commands.MissingRequiredAttachment)):
         return (_extra(ctx, "missing_arg")
                 or f"❌ **Missing argument:** `{error.param.name}`\n**Usage:** {_usage(ctx)}")
@@ -83,6 +82,14 @@ async def handle_command_error(ctx, error):
     if ctx.command is None:
         return
 
+    if isinstance(error, commands.CommandOnCooldown):
+        # A Discord timestamp, so it counts down live ("in 3 seconds", "in 2
+        # seconds", ...), and deleted when the wait is over: left in place,
+        # Discord would go on to show it as "3 seconds ago".
+        await _send(ctx, f"⏳ Cool down! Try again {discord_countdown(error.retry_after)}.",
+                    delete_after=error.retry_after)
+        return
+
     reply = _reply_for(ctx, error)
     if reply is not None:
         await _send(ctx, reply)
@@ -90,9 +97,9 @@ async def handle_command_error(ctx, error):
     await report_unhandled(log, ctx, error, user_message=_extra(ctx, "error_reply"))
 
 
-async def _send(ctx, text):
+async def _send(ctx, text, **kwargs):
     try:
-        await ctx.send(text)
+        await ctx.send(text, **kwargs)
     except Exception:
         # A reply that cannot be delivered (an expired interaction, a channel
         # the bot lost access to) must not turn into a second error.

@@ -18,7 +18,7 @@ def index():
         ("Mythic", game_odds.MYTHIC_PER_PULL,
          "Limited to " + str(game_odds.MYTHIC_MAX_COPIES) + " copies server-wide; claimed by button."),
         ("Guts Cookie", game_odds.GUTSCOOKIE_PER_PULL,
-         "Replaces the pull entirely and awards " + f"{game_odds.SOUR_PATCH_GUTSCOOKIE_XP:,}" + " XP."),
+         "Replaces the pull entirely and awards " + f"{game_odds.GUTSCOOKIE_XP:,}" + " XP."),
         ("Sketch", game_odds.SKETCH_PER_PULL, "Pencil-effect artwork."),
         ("Glitched", game_odds.GLITCHED_PER_PULL, "Datamosh-effect artwork."),
     ):

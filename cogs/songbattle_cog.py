@@ -26,8 +26,8 @@ DEFAULT_ROUNDS = 3
 JOIN_EMOJI = "🎮"
 START_EMOJI = "✅"
 JOIN_TIMEOUT = 45       # seconds to collect players
-VOTE_TIMEOUT = 30       # seconds to collect votes (ends early once every participant has voted)
-TURN_TIMEOUT = 60       # seconds a player has to pull before the battle is abandoned
+VOTE_TIMEOUT = 20       # seconds to collect votes (ends early once every participant has voted)
+TURN_TIMEOUT = 40       # seconds a player has to pull before the battle is abandoned
 VOTE_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]  # must match MAX_PLAYERS
 
 # Same XP economy as a normal .choice "default" pull, so a battle pull is worth what a
@@ -505,7 +505,7 @@ class SongBattleCog(commands.Cog):
                       f"**{winner['song']}** by **{winner['artist']}**!!")
         elif len(winner_indices) > 1:
             names = ", ".join(slots[i]['name'] for i in winner_indices)
-            header = f"🤝 The roundf was tied between {names}!"
+            header = f"🤝 The round was tied between {names}!"
         else:
             header = "🥺 Nobody voted this round!"
 
@@ -543,7 +543,7 @@ class SongBattleCog(commands.Cog):
         players = session["players"]
         scores = session["scores"]
         xp_cog = self.bot.get_cog('XPCog')
-        winner_xp = WINNER_BASE_BONUS_XP * session["rounds_target"]
+        winner_xp = WINNER_BASE_BONUS_XP * session["rounds_target"] * (len(session["players"]) - 1)
 
         changes = await asyncio.to_thread(add_user_xp_many, {uid: winner_xp for uid in match_winner_ids})
         if xp_cog:

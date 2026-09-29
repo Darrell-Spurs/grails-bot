@@ -202,3 +202,8 @@ testing/
 
 # Runtime logs (rotated by utils/logsetup.py)
 logs/
+
+# analysis
+luck.png
+claims.png
+stats/

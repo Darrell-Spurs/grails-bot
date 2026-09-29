@@ -99,7 +99,14 @@ DAILY_XP_MAX = 1000
 
 SOUR_PATCH_ODDS = 0.01          # chance of a Sour Patch Kids after any pull
 SOUR_PATCH_VINYL_SPLIT = 0.5    # of those, share that grant a vinyl instead of a level-up
-SOUR_PATCH_GUTSCOOKIE_XP = 1500 # XP awarded by a Guts Cookie pull
+GUTSCOOKIE_XP = 2500 # XP awarded by a Guts Cookie pull
+
+# Pink Baja Blast: rolled when a player's drops hit empty, at
+# BAJA_BLAST_ODDS_PER_DROP for each drop spent since the stack was last empty
+# (10 -> 0 is 5%, 3 -> 0 is 1.5%). Every drop is worth the same, so spamming
+# each drop as it recharges earns nothing extra.
+BAJA_BLAST_ODDS_PER_DROP = 0.005   # 0.5% per drop in the run
+BAJA_BLAST_REFILL = 10             # drops it refills the empty stack to
 
 
 # --- Vinyl pulls ------------------------------------------------------------

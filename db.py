@@ -433,6 +433,8 @@ _POSTGRES_SCHEMA = (
     # players who predate the feature are not punished for it.
     _pg_add_column("users", "pull_charges", "INTEGER DEFAULT 20"),
     _pg_add_column("users", "pull_charges_at", "TIMESTAMP DEFAULT NULL"),
+    # Drops spent since the stack last hit empty, for the Pink Baja Blast roll.
+    _pg_add_column("users", "drops_since_empty", "INTEGER DEFAULT 0"),
 
     """CREATE TABLE IF NOT EXISTS collections (
         id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -629,6 +631,7 @@ def init_db():
         ("favorite_artist", "ALTER TABLE users ADD COLUMN favorite_artist TEXT DEFAULT NULL"),
         ("pull_charges", "ALTER TABLE users ADD COLUMN pull_charges INTEGER DEFAULT 20"),
         ("pull_charges_at", "ALTER TABLE users ADD COLUMN pull_charges_at TIMESTAMP DEFAULT NULL"),
+        ("drops_since_empty", "ALTER TABLE users ADD COLUMN drops_since_empty INTEGER DEFAULT 0"),
     ):
         if col not in user_cols:
             c.execute(ddl)
@@ -1776,13 +1779,23 @@ def spend_pull_charge(user_id, cost=None):
         if fresh >= economy.PULL_CAP:
             new_anchor = now
 
-        c.execute("UPDATE users SET pull_charges = ?, pull_charges_at = ? WHERE id = ?",
-                  (remaining, new_anchor, user_id))
+        # drops_since_empty counts the drops in the current run down to zero.
+        # When this spend empties the stack, the run's length is reported (the
+        # Pink Baja Blast rolls on it) and the count starts over.
+        c.execute("""UPDATE users SET pull_charges = ?, pull_charges_at = ?,
+                                      drops_since_empty = COALESCE(drops_since_empty, 0) + ?
+                     WHERE id = ? RETURNING drops_since_empty""",
+                  (remaining, new_anchor, cost, user_id))
+        run = next(iter(c.fetchall()), (0,))[0]
+        if remaining == 0:
+            c.execute("UPDATE users SET drops_since_empty = 0 WHERE id = ?", (user_id,))
         conn.commit()
         return True, {
             "charges": remaining, "cap": economy.PULL_CAP,
             "next_in": economy.seconds_to_next(remaining, new_anchor, now),
             "full_in": economy.seconds_to_full(remaining, new_anchor, now),
+            # Set only on the spend that empties the stack.
+            "emptied_after": run if remaining == 0 else 0,
         }
     finally:
         conn.close()
