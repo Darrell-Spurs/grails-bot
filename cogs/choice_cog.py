@@ -340,7 +340,7 @@ class ChoiceCog(commands.Cog):
               ctx.author.name, run, odds.BAJA_BLAST_REFILL)
 
         embed = discord.Embed(
-            title="Olivia has gifted you a Pink Baja Blast!",
+            title=f"{aesthetics.named_emoji('pink_baja_blast')} Olivia has gifted you a Pink Baja Blast!".strip(),
             description="Your drops seem pretty refilled, use `.cd` to check!",
             color=discord.Color.from_rgb(255, 105, 180),
         )

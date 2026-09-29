@@ -105,7 +105,7 @@ GUTSCOOKIE_XP = 2500 # XP awarded by a Guts Cookie pull
 # BAJA_BLAST_ODDS_PER_DROP for each drop spent since the stack was last empty
 # (10 -> 0 is 5%, 3 -> 0 is 1.5%). Every drop is worth the same, so spamming
 # each drop as it recharges earns nothing extra.
-BAJA_BLAST_ODDS_PER_DROP = 0.005   # 0.5% per drop in the run
+BAJA_BLAST_ODDS_PER_DROP = 1   # 0.5% per drop in the run
 BAJA_BLAST_REFILL = 10             # drops it refills the empty stack to
 
 
