@@ -307,11 +307,17 @@ class ChoiceCog(commands.Cog):
         """
         lock = self._pull_locks.setdefault(ctx.author.id, asyncio.Lock())
         async with lock:
-            spent, status = await asyncio.to_thread(db.spend_pull_charge, ctx.author.id)
+            spent, status = await asyncio.to_thread(
+                db.spend_pull_charge, ctx.author.id, None, ctx.channel.id)
 
         if not spent:
             await ctx.send(embed=self._no_charges_embed(ctx, status))
             return
+
+        # Book the "fully recharged" ping for when this stack fills again.
+        recharge = self.bot.get_cog("RechargeCog")
+        if recharge:
+            recharge.schedule(ctx.author.id, status.get("full_at"))
 
         try:
             await self._run_choice(ctx)
@@ -319,6 +325,7 @@ class ChoiceCog(commands.Cog):
             # The charge bought nothing, so give it back. Refunding before the
             # re-raise means the error still reaches the handler and the log.
             await asyncio.to_thread(db.add_pull_charges, ctx.author.id, economy.PULL_COST)
+            await self._refresh_recharge_ping(ctx.author.id)
             event(log, "drop refunded", "%s   after a failed pull", ctx.author.name)
             raise
 
@@ -326,6 +333,13 @@ class ChoiceCog(commands.Cog):
         # many drops the run down to zero took.
         if status and status.get("emptied_after"):
             await self._maybe_baja_blast(ctx, status["emptied_after"])
+
+    async def _refresh_recharge_ping(self, user_id):
+        """Drops handed back move the "fully recharged" ping earlier, or cancel
+        it when they fill the stack; the database has the new time."""
+        recharge = self.bot.get_cog("RechargeCog")
+        if recharge:
+            await recharge.refresh(user_id)
 
     async def _maybe_baja_blast(self, ctx, run):
         """Running the stack down to empty may bring a Pink Baja Blast, which
@@ -336,6 +350,7 @@ class ChoiceCog(commands.Cog):
         if random.random() >= min(1.0, odds.BAJA_BLAST_ODDS_PER_DROP * run):
             return
         await asyncio.to_thread(db.add_pull_charges, ctx.author.id, odds.BAJA_BLAST_REFILL)
+        await self._refresh_recharge_ping(ctx.author.id)
         event(log, "baja blast", "%s   after a run of %d, drops refilled to %d",
               ctx.author.name, run, odds.BAJA_BLAST_REFILL)
 

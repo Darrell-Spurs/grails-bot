@@ -435,6 +435,12 @@ _POSTGRES_SCHEMA = (
     _pg_add_column("users", "pull_charges_at", "TIMESTAMP DEFAULT NULL"),
     # Drops spent since the stack last hit empty, for the Pink Baja Blast roll.
     _pg_add_column("users", "drops_since_empty", "INTEGER DEFAULT 0"),
+    # When the stack will be full again and where the player last pulled, for
+    # the "fully recharged" ping. NULL once sent or when there is nothing to send.
+    _pg_add_column("users", "full_notify_at", "TIMESTAMP DEFAULT NULL"),
+    _pg_add_column("users", "notify_channel_id", "TEXT DEFAULT NULL"),
+    # 0 when the player turned the ping off with .notify.
+    _pg_add_column("users", "recharge_ping", "INTEGER DEFAULT 1"),
 
     """CREATE TABLE IF NOT EXISTS collections (
         id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -632,6 +638,9 @@ def init_db():
         ("pull_charges", "ALTER TABLE users ADD COLUMN pull_charges INTEGER DEFAULT 20"),
         ("pull_charges_at", "ALTER TABLE users ADD COLUMN pull_charges_at TIMESTAMP DEFAULT NULL"),
         ("drops_since_empty", "ALTER TABLE users ADD COLUMN drops_since_empty INTEGER DEFAULT 0"),
+        ("full_notify_at", "ALTER TABLE users ADD COLUMN full_notify_at TIMESTAMP DEFAULT NULL"),
+        ("notify_channel_id", "ALTER TABLE users ADD COLUMN notify_channel_id TEXT DEFAULT NULL"),
+        ("recharge_ping", "ALTER TABLE users ADD COLUMN recharge_ping INTEGER DEFAULT 1"),
     ):
         if col not in user_cols:
             c.execute(ddl)
@@ -1738,8 +1747,12 @@ def get_pull_status(user_id):
         conn.close()
 
 
-def spend_pull_charge(user_id, cost=None):
+def spend_pull_charge(user_id, cost=None, channel_id=None):
     """Take `cost` charges if they are there. Returns (spent, status).
+
+    A successful spend also books the "fully recharged" ping: status["full_at"]
+    is when the stack will be full again, stored with `channel_id` so the ping
+    goes where the player last pulled.
 
     Regeneration is applied first, so a player who has been away always gets
     what they are owed before the cost is taken. `spent` is False when the
@@ -1779,13 +1792,19 @@ def spend_pull_charge(user_id, cost=None):
         if fresh >= economy.PULL_CAP:
             new_anchor = now
 
+        full_at = now + _datetime.timedelta(
+            seconds=economy.seconds_to_full(remaining, new_anchor, now))
+
         # drops_since_empty counts the drops in the current run down to zero.
         # When this spend empties the stack, the run's length is reported (the
         # Pink Baja Blast rolls on it) and the count starts over.
         c.execute("""UPDATE users SET pull_charges = ?, pull_charges_at = ?,
-                                      drops_since_empty = COALESCE(drops_since_empty, 0) + ?
+                                      drops_since_empty = COALESCE(drops_since_empty, 0) + ?,
+                                      full_notify_at = ?,
+                                      notify_channel_id = COALESCE(?, notify_channel_id)
                      WHERE id = ? RETURNING drops_since_empty""",
-                  (remaining, new_anchor, cost, user_id))
+                  (remaining, new_anchor, cost, full_at,
+                   str(channel_id) if channel_id else None, user_id))
         run = next(iter(c.fetchall()), (0,))[0]
         if remaining == 0:
             c.execute("UPDATE users SET drops_since_empty = 0 WHERE id = ?", (user_id,))
@@ -1796,6 +1815,7 @@ def spend_pull_charge(user_id, cost=None):
             "full_in": economy.seconds_to_full(remaining, new_anchor, now),
             # Set only on the spend that empties the stack.
             "emptied_after": run if remaining == 0 else 0,
+            "full_at": full_at,
         }
     finally:
         conn.close()
@@ -1806,6 +1826,9 @@ def add_pull_charges(user_id, count=1):
 
     Capped like any other gain, and it does not touch the anchor: a refund
     should not also reset how far along the next charge was.
+
+    A pending "fully recharged" ping moves earlier to match, or is dropped when
+    this fills the stack -- nobody needs telling about drops they were handed.
     """
     user_id = _uid(user_id)
     conn = get_connection()
@@ -1815,12 +1838,104 @@ def add_pull_charges(user_id, count=1):
         if state is None:
             return None
         charges, anchor = state
-        fresh, new_anchor = economy.regenerate(charges, anchor)
+        now = economy._utcnow()
+        fresh, new_anchor = economy.regenerate(charges, anchor, now)
         total = max(0, min(fresh + count, economy.PULL_CAP))
-        c.execute("UPDATE users SET pull_charges = ?, pull_charges_at = ? WHERE id = ?",
-                  (total, new_anchor, user_id))
+        full_at = (None if total >= economy.PULL_CAP else
+                   now + _datetime.timedelta(seconds=economy.seconds_to_full(total, new_anchor, now)))
+        c.execute("""UPDATE users SET pull_charges = ?, pull_charges_at = ?,
+                                      full_notify_at = CASE WHEN full_notify_at IS NULL
+                                                            THEN NULL ELSE ? END
+                     WHERE id = ?""",
+                  (total, new_anchor, full_at, user_id))
         conn.commit()
         return total
+    finally:
+        conn.close()
+
+
+def set_recharge_ping(user_id, on=None):
+    """Turn the "fully recharged" ping on or off; `on` of None flips it.
+    Returns the new setting, or None when the user is not registered."""
+    user_id = _uid(user_id)
+    conn = get_connection()
+    try:
+        c = conn.cursor()
+        c.execute("SELECT recharge_ping FROM users WHERE id = ?", (user_id,))
+        row = c.fetchone()
+        if row is None:
+            return None
+        current = row[0] != 0
+        new = (not current) if on is None else bool(on)
+        c.execute("UPDATE users SET recharge_ping = ? WHERE id = ?", (int(new), user_id))
+        conn.commit()
+        return new
+    finally:
+        conn.close()
+
+
+def get_full_notice(user_id):
+    """When this user's "fully recharged" ping is due, or None if none is."""
+    conn = get_connection()
+    try:
+        c = conn.cursor()
+        c.execute("SELECT full_notify_at FROM users WHERE id = ?", (_uid(user_id),))
+        row = c.fetchone()
+        return _as_naive_utc(row[0]) if row else None
+    finally:
+        conn.close()
+
+
+def pending_full_notices():
+    """[(user_id, due)] for every ping still to send; read once at startup."""
+    conn = get_connection()
+    try:
+        c = conn.cursor()
+        c.execute("SELECT id, full_notify_at FROM users WHERE full_notify_at IS NOT NULL")
+        return [(uid, _as_naive_utc(due)) for uid, due in c.fetchall()]
+    finally:
+        conn.close()
+
+
+def take_full_notice(user_id):
+    """Claim a due "fully recharged" ping. Returns one of:
+
+      ("send", channel_id)  -- due and the stack is full; cleared so it goes once
+      ("later", due)        -- moved later since it was scheduled
+      None                  -- nothing to send any more
+    """
+    user_id = _uid(user_id)
+    conn = get_connection()
+    try:
+        c = conn.cursor()
+        c.execute("""SELECT pull_charges, pull_charges_at, full_notify_at, notify_channel_id,
+                            recharge_ping
+                     FROM users WHERE id = ?""", (user_id,))
+        row = c.fetchone()
+        if row is None or row[2] is None:
+            return None
+        if row[4] == 0:
+            # Turned off with .notify: drop the booking without sending.
+            c.execute("UPDATE users SET full_notify_at = NULL WHERE id = ?", (user_id,))
+            conn.commit()
+            return None
+        charges = row[0] if row[0] is not None else economy.PULL_CAP
+        anchor, due, channel_id = _as_naive_utc(row[1]), _as_naive_utc(row[2]), row[3]
+        now = economy._utcnow()
+        if due > now:
+            return "later", due
+        fresh, new_anchor = economy.regenerate(charges, anchor, now)
+        if fresh < economy.PULL_CAP:
+            # Should not happen (the due time comes from the same arithmetic),
+            # but if the numbers were changed by hand, wait for the real moment.
+            due = now + _datetime.timedelta(seconds=economy.seconds_to_full(fresh, new_anchor, now))
+            c.execute("UPDATE users SET full_notify_at = ? WHERE id = ?", (due, user_id))
+            conn.commit()
+            return "later", due
+        c.execute("""UPDATE users SET pull_charges = ?, pull_charges_at = ?, full_notify_at = NULL
+                     WHERE id = ?""", (fresh, new_anchor, user_id))
+        conn.commit()
+        return ("send", channel_id) if channel_id else None
     finally:
         conn.close()
 

@@ -26,7 +26,7 @@ BRIEF_MAX = 72
 # A command missing from here still appears, under "More". A hardcoded map would
 # otherwise let a newly added command silently never show up in /help.
 HELP_SECTIONS = (
-    ("Drops", ("choice", "sigvinyl", "vinyl", "cooldown")),
+    ("Drops", ("choice", "sigvinyl", "vinyl", "cooldown", "notify")),
     # No "offer": answering a trade is the Offer a card button on the request
     # itself, not a command, so there is nothing for /help to list.
     ("Trading", ("trade", "canceltrade", "gift")),
