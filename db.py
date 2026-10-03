@@ -1841,13 +1841,20 @@ def add_pull_charges(user_id, count=1):
         now = economy._utcnow()
         fresh, new_anchor = economy.regenerate(charges, anchor, now)
         total = max(0, min(fresh + count, economy.PULL_CAP))
-        full_at = (None if total >= economy.PULL_CAP else
-                   now + _datetime.timedelta(seconds=economy.seconds_to_full(total, new_anchor, now)))
-        c.execute("""UPDATE users SET pull_charges = ?, pull_charges_at = ?,
-                                      full_notify_at = CASE WHEN full_notify_at IS NULL
-                                                            THEN NULL ELSE ? END
-                     WHERE id = ?""",
-                  (total, new_anchor, full_at, user_id))
+        if total >= economy.PULL_CAP:
+            c.execute("""UPDATE users SET pull_charges = ?, pull_charges_at = ?,
+                                          full_notify_at = NULL
+                         WHERE id = ?""",
+                      (total, new_anchor, user_id))
+        else:
+            # Only ever bound to a real datetime: Postgres cannot type a bare
+            # NULL parameter inside CASE and rejects it as text.
+            full_at = now + _datetime.timedelta(seconds=economy.seconds_to_full(total, new_anchor, now))
+            c.execute("""UPDATE users SET pull_charges = ?, pull_charges_at = ?,
+                                          full_notify_at = CASE WHEN full_notify_at IS NULL
+                                                                THEN NULL ELSE ? END
+                         WHERE id = ?""",
+                      (total, new_anchor, full_at, user_id))
         conn.commit()
         return total
     finally:

@@ -416,19 +416,18 @@ class XPCog(commands.Cog):
             title = f"{named_emoji('sig_vinyl')} {ctx.author.display_name} received a Signature Vinyl!"
         else:
             title = f"{named_emoji('vinyl')} {ctx.author.display_name} received a Vinyl!"
-        embed = discord.Embed(title=title, color=discord.Color.from_rgb(139, 69, 19))
-
-
-        # The song goes in the field *value*: Discord does not render markdown
-        # in a field name, so the asterisks showed through literally.
         counts = await asyncio.to_thread(self._keep_vinyl_pull, ctx.author.id, song_id, album_id,
                                          "sig_vinyl" if is_sig else "vinyl")
         owned = counts[1] if guaranteed_sig else counts[0]
         remaining = named_emoji('sig_vinyl') if guaranteed_sig else named_emoji('vinyl')
-        embed.add_field(
-            name=f"{emoji} **{song}** by **{artist}** from *{album[1]}*\n",
-            value=f"Owned: {owned} {remaining}",
-            inline=False)
+        # The song goes in the description, not a field name: field names cap
+        # at 256 characters, and a long title plus a long album name (a
+        # "From <musical>" mashup) went over it and Discord rejected the message.
+        embed = discord.Embed(
+            title=title,
+            description=f"{emoji} **{song}** by **{artist}** from *{album[1]}*\n"
+                        f"Owned: {owned} {remaining}",
+            color=discord.Color.from_rgb(139, 69, 19))
 
         embed.set_image(url=f"attachment://{media_name}")
         file = discord.File(media_buf, filename=media_name, spoiler=False)

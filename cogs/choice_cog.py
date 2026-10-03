@@ -329,10 +329,21 @@ class ChoiceCog(commands.Cog):
             event(log, "drop refunded", "%s   after a failed pull", ctx.author.name)
             raise
 
+        # The drop is posted; what follows are extras. A failure in one is
+        # logged, not reported: the pull worked, and the error handler would
+        # tell the player it had not.
+        await self._run_extra(ctx, self._maybe_sourpatch_bonus(ctx), "sour patch")
         # Emptying the stack rolls for a Pink Baja Blast, at odds scaled by how
         # many drops the run down to zero took.
         if status and status.get("emptied_after"):
-            await self._maybe_baja_blast(ctx, status["emptied_after"])
+            await self._run_extra(ctx, self._maybe_baja_blast(ctx, status["emptied_after"]),
+                                  "baja blast")
+
+    async def _run_extra(self, ctx, coro, name):
+        try:
+            await coro
+        except Exception:
+            log.exception("%s failed after %s's pull", name, ctx.author.name)
 
     async def _refresh_recharge_ping(self, user_id):
         """Drops handed back move the "fully recharged" ping earlier, or cancel
@@ -429,8 +440,6 @@ class ChoiceCog(commands.Cog):
             xp_cog = self.bot.get_cog('XPCog')
             if xp_cog:
                 await xp_cog.announce_level_ups(xp_changes, ctx.channel, {ctx.author.id: ctx.author})
-
-            await self._maybe_sourpatch_bonus(ctx)
             return
 
         if "mythic" in variants:
@@ -461,8 +470,6 @@ class ChoiceCog(commands.Cog):
         event(log, "respond time", "%s   %.0fms total",
               ctx.author.name, (time.perf_counter() - started) * 1000)
 
-        await self._maybe_sourpatch_bonus(ctx)
-
     async def _send_mythic(self, ctx, resolved):
         song_id, song_name, artist, album_id, album_name, album_url, next_copy_number, rarity = resolved
 
@@ -489,10 +496,17 @@ class ChoiceCog(commands.Cog):
         # the same way -- two people pulling #3 and #4 of the same song get
         # visibly different sparkle fields, and re-rendering either reproduces
         # it exactly.
-        gif_buf = await asyncio.to_thread(
-            mythic_card_gif_bytes, album_url,
-            copy_number=next_copy_number, rarity=rarity,
-            seed=f"{song_id}:{next_copy_number}")
+        try:
+            gif_buf = await asyncio.to_thread(
+                mythic_card_gif_bytes, album_url,
+                copy_number=next_copy_number, rarity=rarity,
+                seed=f"{song_id}:{next_copy_number}")
+        except Exception:
+            # Usually the cover download. The reveal and claim button are
+            # already posted, so raising here would report a working pull as
+            # failed -- and refund it.
+            log.exception("mythic gif generation failed for %s", album_url)
+            gif_buf = None
         if gif_buf is None:
             log.warning("mythic gif generation returned nothing for %s", album_url)
             await message.edit(content="(Missing mythic gif \u2757)")
@@ -510,8 +524,6 @@ class ChoiceCog(commands.Cog):
                 log.exception("could not attach the mythic gif for %s", song_name)
             event(log, "respond time", "mythic art for %s attached %.0fms after the reveal",
                   song_name, (time.perf_counter() - started) * 1000)
-
-        await self._maybe_sourpatch_bonus(ctx)
 
     @commands.command(extras={"missing_arg": "❌ **Missing arguments!**\n"
                           "**Usage:** `.hunt <song_name> / <album_name> / <artist>`\n"
